@@ -15,12 +15,6 @@ Abra o arquivo:
 sudo vim /etc/selinux/config
 ```
 
-Se você quiser ganhar tempo, pode usar este comando único (em vez de abrir o editor) para alterar o arquivo:
-```Bash
-sudo sed -i 's/^SELINUX=disabled/SELINUX=permissive/' /etc/selinux/config
-```
-
-
 #### Localize a linha que começa com `SELINUX=`.
 
 Altere de `disabled` para `permissive`.
@@ -29,6 +23,12 @@ Deve ficar exatamente assim:
 `SELINUX=permissive`
 
 Salve e saia (:wq).
+
+
+Se você quiser ganhar tempo, pode usar este comando único (em vez de abrir o editor) para alterar o arquivo:
+```Bash
+sudo sed -i 's/^SELINUX=disabled/SELINUX=permissive/' /etc/selinux/config
+```
 
 
 ### Passo 3: O arquivo de sinalização (Crucial!)

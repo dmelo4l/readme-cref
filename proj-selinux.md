@@ -12,7 +12,7 @@ Você precisa editar o arquivo principal de configuração. Cuidado aqui: se voc
 
 Abra o arquivo:
 ```Bash
-sudo vim /etc/selinux/config
+vim /etc/selinux/config
 ```
 
 #### Localize a linha que começa com `SELINUX=`.
@@ -31,7 +31,7 @@ cat /etc/selinux/config
 
 Se você quiser ganhar tempo, pode usar este comando único (em vez de abrir o editor) para alterar o arquivo:
 ```Bash
-sudo sed -i 's/^SELINUX=disabled/SELINUX=permissive/' /etc/selinux/config
+sed -i 's/^SELINUX=disabled/SELINUX=permissive/' /etc/selinux/config
 ```
 
 
@@ -39,7 +39,7 @@ sudo sed -i 's/^SELINUX=disabled/SELINUX=permissive/' /etc/selinux/config
 Quando o SELinux é ativado pela primeira vez em um sistema que estava desativado, todos os arquivos do disco precisam ser "carimbados" (rotulados). Para que o Linux faça isso automaticamente no próximo boot, execute:
 
 ```Bash
-sudo touch /.autorelabel
+touch /.autorelabel
 ```
 Nota: Esse comando cria um arquivo vazio na raiz. O sistema verá esse arquivo no boot, fará o processo de rotulagem e depois apagará o arquivo sozinho.
 
@@ -49,7 +49,7 @@ Nota: Esse comando cria um arquivo vazio na raiz. O sistema verá esse arquivo n
 Infelizmente, para passar de disabled para permissive, o kernel precisa ser carregado com o SELinux ativo.
 
 ```Bash
-sudo reboot
+reboot
 ```
 
 
@@ -71,13 +71,13 @@ Como essa tarefa envolve reboot, você não pode fazer todos de uma vez se eles 
 - Monitoramento de Violações: Para ver o que o SELinux registraria como bloqueio (as "violações" da descrição), você poderá usar este comando futuramente:
 
 ```Bash
-sudo ausearch -m AVC -ts recent
+ausearch -m AVC -ts recent
 ```
 
 
 Se você quiser ganhar tempo, pode usar este comando único (em vez de abrir o editor) para alterar o arquivo:
 ```Bash
-sudo sed -i 's/^SELINUX=disabled/SELINUX=permissive/' /etc/selinux/config
+sed -i 's/^SELINUX=disabled/SELINUX=permissive/' /etc/selinux/config
 ```
 
 

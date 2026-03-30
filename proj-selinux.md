@@ -24,8 +24,9 @@ Deve ficar exatamente assim:
 
 Salve e saia (:wq).
 
+Valide a mudança:
 ```Bash
-/etc/selinux/config
+cat /etc/selinux/config
 ```
 
 Se você quiser ganhar tempo, pode usar este comando único (em vez de abrir o editor) para alterar o arquivo:

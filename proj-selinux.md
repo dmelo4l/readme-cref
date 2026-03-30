@@ -62,6 +62,10 @@ sestatus
 O status deve aparecer como enabled, mas o "Current mode" deve ser `permissive`.
 
 
+```Bash
+grep "avc:  denied" /var/log/audit/audit.log
+```
+
 
 ### Plano de Ação para os 23 servidores
 Como essa tarefa envolve reboot, você não pode fazer todos de uma vez se eles fizerem parte de um cluster ou serviço crítico.
@@ -75,10 +79,15 @@ ausearch -m AVC -ts recent
 ```
 
 
-Se você quiser ganhar tempo, pode usar este comando único (em vez de abrir o editor) para alterar o arquivo:
+Precisa fazer algo a mais?
+Para fechar a tarefa com chave de ouro e garantir que você seguiu a "Descrição" à risca, faltam dois detalhes operacionais:
+
+Validar o Log de Violações:
+A descrição da tarefa menciona "registrando violações". Para provar que ele está funcionando, rode este comando:
 ```Bash
-sed -i 's/^SELINUX=disabled/SELINUX=permissive/' /etc/selinux/config
+grep "avc:  denied" /var/log/audit/audit.log
 ```
 
+Se aparecerem linhas, são as ações que seriam bloqueadas se ele estivesse em modo Enforcing. Se não aparecer nada, é porque o servidor ainda não teve nenhuma tentativa de acesso negada pelas regras.
 
 

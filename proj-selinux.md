@@ -1,3 +1,70 @@
+# Enforcing
+
+### 1. Validação Inicial
+Antes de mexer em qualquer coisa, confirme se o servidor está pronto para a migração.
+* **Comando:** `sestatus`
+* **O que conferir:** O status deve ser `enabled` e o modo `permissive`. Se estiver `disabled`, você precisará do reboot (aquele processo de `touch /.autorelabel` que fizemos antes).
+
+### 2. Conferir o que seria bloqueado
+Verifique se existem "violações" registradas enquanto o servidor estava em modo permissivo.
+* **Comando:** `sudo ausearch -m AVC -ts recent`
+* **O que conferir:** Se aparecer `<no matches>`, está limpo. Se aparecerem linhas de `denied`, você precisa liberar antes de ativar o bloqueio.
+
+### 3. Liberar o Zabbix (Preparar o terreno)
+Como vimos que o Zabbix costuma ser bloqueado, execute estes comandos para dar as permissões necessárias "antecipadamente".
+* **Comando 1:** `sudo setsebool -P zabbix_can_network 1` (Libera a rede para o Zabbix).
+* **Comando 2:** `sudo setsebool -P daemons_enable_cluster_mode 1` (Libera a comunicação interna do Zabbix).
+
+### 4. Revalidar a limpeza
+Após rodar as liberações acima, limpe a tela e verifique se o log de erros parou.
+* **Comando:** `sudo ausearch -m AVC -ts recent`
+* **O que conferir:** Agora deve aparecer `<no matches>`. Se aparecer, o caminho está livre para o próximo passo.
+
+### 5. Ativar o Modo Enforcing (Bloqueio Real)
+Agora que o log está limpo, ative o bloqueio na memória do servidor.
+* **Comando:** `sudo setenforce 1`
+* **Para que serve:** Faz o SELinux começar a bloquear de fato qualquer ação não autorizada.
+
+### 6. Tornar a configuração Permanente
+Se você não fizer este passo, quando o servidor reiniciar ele voltará para o modo anterior.
+* **Comando:** `sudo sed -i 's/SELINUX=permissive/SELINUX=enforcing/' /etc/selinux/config`
+* **Para que serve:** Altera o arquivo de configuração de forma automática para `enforcing`.
+
+### 7. Confirmar que está tudo certo
+A validação final para você marcar como "Concluído" no seu checklist.
+* **Comando 1:** `sestatus` (Confirme se o `Current mode` é `enforcing`).
+* **Comando 2:** Verifique o Dashboard do Zabbix. Se o servidor continuar "Verde" e coletando dados, a migração foi perfeita.
+
+
+Se em algum servidor o Passo 5 (`setenforce 1`) fizer o Zabbix parar, você pode voltar para o modo seguro instantaneamente rodando `sudo setenforce 0`.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Permissive
+
 ### Passo 1: Verificar o estado atual
 Antes de começar, confirme se ele realmente está desativado:
 

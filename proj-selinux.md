@@ -39,7 +39,9 @@ A validação final para você marcar como "Concluído" no seu checklist.
 Se em algum servidor o Passo 5 (`setenforce 1`) fizer o Zabbix parar, você pode voltar para o modo seguro instantaneamente rodando `sudo setenforce 0`.
 
 
+systemctl status zabbix-proxy
 
+systemctl status zabbix-agent2
 
 
 

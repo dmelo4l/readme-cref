@@ -1,4 +1,4 @@
-# Atualizar o ZAbbix Agent
+# Atualizar o Zabbix Agent
 
 yum clean all
 
@@ -6,7 +6,7 @@ yum makecache
 
 systemctl stop zabbix-agent
 
-dnf install zabbix-agent2*
+dnf install zabbix-agent2* --nogpgcheck
 
 systemctl start zabbix-agent2
 

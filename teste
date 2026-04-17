@@ -1,0 +1,238 @@
+#!/bin/bash
+###############################################################################
+# backup_zabbix_basico.sh
+#
+# Backup simplificado e automatizado. Verifica os servicos ativos localmente
+# e faz backup apenas dos configuracoes necessarias (server, proxies, agentes,
+# postgres, haproxy, e exports da API).
+###############################################################################
+
+set -uo pipefail
+
+# ===========================================================================
+# CREDENCIAIS E CONFIGURACOES
+# ===========================================================================
+GIT_USER="usr_zabbix"
+GIT_PASS="bolodoido@123"
+GIT_HOST="gitlab.local"
+GIT_PROJECT="zbx/Zabbix"
+GIT_BRANCH="main"
+
+# A URL final de conexao ao GitLab via HTTPS
+GIT_REPO_URL="https://${GIT_USER}:${GIT_PASS}@${GIT_HOST}/${GIT_PROJECT}.git"
+
+# Onde o repositorio ficara na maquina alvo
+GIT_REPO_LOCAL="/var/backups/backup-zabbix-repo"
+
+# API Zabbix 
+ZABBIX_API_URL="https://zbx-web.crefisa.com.br/zabbix/api_jsonrpc.php"
+ZABBIX_API_USER="usr_zabbix_prd"
+ZABBIX_API_PASS="P#UD7!5ohr"
+
+# Variaveis de execucao
+HOSTNAME_ID=$(hostname -s | tr '[:upper:]' '[:lower:]')
+DEST="${GIT_REPO_LOCAL}/${HOSTNAME_ID}"
+LOG_FILE="/var/log/backup_zabbix_basico.log"
+
+# ===========================================================================
+# FUNCOES AUXILIARES
+# ===========================================================================
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}
+
+coletar() {
+    local subpasta="$1"
+    shift
+    local destino="${DEST}/${subpasta}"
+    mkdir -p "$destino"
+
+    for origem in "$@"; do
+        local encontrados
+        encontrados=$(compgen -G "$origem" 2>/dev/null || true)
+        for item in $encontrados; do
+            if [ -e "$item" ]; then
+                cp -rL "$item" "$destino/" 2>/dev/null && \
+                    log "  [OK] Copiado: ${subpasta}/$(basename "$item")" || \
+                    log "  [ERRO] Falha ao copiar: $item"
+            fi
+        done
+    done
+}
+
+# ===========================================================================
+# 1. PREPARACAO DO REPOSITORIO
+# ===========================================================================
+log "============================================================"
+log "INICIANDO BACKUP BASICO - ${HOSTNAME_ID}"
+log "============================================================"
+
+# Desabilita o prompt pedindo senha do git (importante para script) e valida SSL
+export GIT_TERMINAL_PROMPT=0
+export GIT_SSL_NO_VERIFY=1
+
+if [ ! -d "${GIT_REPO_LOCAL}/.git" ]; then
+    log ">>> Clonando repositorio GitLab..."
+    git clone "$GIT_REPO_URL" "$GIT_REPO_LOCAL" 2>>"$LOG_FILE" || {
+        log "[FATAL] Falha ao clonar repositorio Git. URL verificada: https://${GIT_USER}@${GIT_HOST}/${GIT_PROJECT}.git"
+        exit 1
+    }
+else
+    log ">>> Atualizando repositorio com rebase..."
+    cd "$GIT_REPO_LOCAL"
+    git remote set-url origin "$GIT_REPO_URL"
+    git fetch origin 2>>"$LOG_FILE"
+    git checkout "$GIT_BRANCH" 2>>"$LOG_FILE" || git checkout -b "$GIT_BRANCH" 2>>"$LOG_FILE"
+    git pull --rebase origin "$GIT_BRANCH" 2>>"$LOG_FILE" || true
+fi
+
+cd "$GIT_REPO_LOCAL"
+git config user.email "${GIT_USER}@crefisa.com.br" 2>/dev/null
+git config user.name "Backup Zabbix - ${HOSTNAME_ID}" 2>/dev/null
+
+log ">>> Limpando pasta local do servidor: ${HOSTNAME_ID}/"
+rm -rf "$DEST"
+mkdir -p "$DEST"
+
+# ===========================================================================
+# 2. VERIFICACAO DOS SERVICOS E COLETA ARQUIVOS
+# ===========================================================================
+log ">>> Verificando servicos ativos e coletando arquivos..."
+
+# Zabbix Server
+if systemctl is-active --quiet zabbix-server || pgrep -x zabbix_server >/dev/null; then
+    log "  Servico zabbix-server ativo! Coletando..."
+    coletar "zabbix-server" /etc/zabbix/zabbix_server.conf
+    coletar "zabbix-server" /usr/lib/zabbix/alertscripts
+    coletar "zabbix-server" /usr/lib/zabbix/externalscripts
+fi
+
+# Zabbix Proxy
+if systemctl is-active --quiet zabbix-proxy || pgrep -x zabbix_proxy >/dev/null; then
+    log "  Servico zabbix-proxy ativo! Coletando..."
+    coletar "zabbix-proxy" /etc/zabbix/zabbix_proxy.conf
+fi
+
+# Zabbix Agent (C e Go)
+if systemctl is-active --quiet zabbix-agent || pgrep -x zabbix_agentd >/dev/null; then
+    log "  Servico zabbix-agent ativo! Coletando..."
+    coletar "zabbix-agent" /etc/zabbix/zabbix_agentd.conf /etc/zabbix/zabbix_agentd.d/*
+fi
+
+if systemctl is-active --quiet zabbix-agent2 || pgrep -x zabbix_agent2 >/dev/null; then
+    log "  Servico zabbix-agent2 ativo! Coletando..."
+    coletar "zabbix-agent2" /etc/zabbix/zabbix_agent2.conf /etc/zabbix/zabbix_agent2.d/*
+fi
+
+# Diretorio Lib Geral
+coletar "zabbix-lib" /var/lib/zabbix/*
+
+# Banco PostgreSQL
+if systemctl is-active --quiet postgresql* 2>/dev/null || pgrep -x postgres >/dev/null; then
+    log "  Servico PostgreSQL ativo! Coletando..."
+    for pg_dir in /etc/postgresql/*/main /var/lib/pgsql/*/data /var/lib/pgsql/data; do
+        if [ -d "$pg_dir" ]; then
+            coletar "postgresql" "$pg_dir/postgresql.conf" "$pg_dir/pg_hba.conf" "$pg_dir/pg_ident.conf"
+        fi
+    done
+fi
+
+# HAProxy
+if systemctl is-active --quiet haproxy || pgrep -x haproxy >/dev/null; then
+    log "  Servico HAProxy ativo! Coletando..."
+    coletar "haproxy" /etc/haproxy/haproxy.cfg /etc/haproxy/conf.d/*
+fi
+
+# ===========================================================================
+# 3. EXPORTACAO VIA API (Somente no Host do Server ou Front-End)
+# ===========================================================================
+# Evita que todo agent faça a mesma requisicao na API exportando os templates
+if systemctl is-active --quiet zabbix-server || [[ "$HOSTNAME_ID" == *"web"* ]] || [[ "$HOSTNAME_ID" == *"zabbix001"* ]]; then
+    log ">>> Coletando dados via API Zabbix..."
+    API_DIR="${DEST}/zabbix-api-export"
+    mkdir -p "$API_DIR"
+
+    if command -v curl &>/dev/null; then
+        # Usa -k (insecure) caso a API nao possua certificado confiavel globalmente 
+        API_TOKEN=$(curl -k -s -X POST "${ZABBIX_API_URL}" \
+            -H "Content-Type: application/json" \
+            -d '{
+                "jsonrpc": "2.0",
+                "method":  "user.login",
+                "params":  {"username": "'"${ZABBIX_API_USER}"'", "password": "'"${ZABBIX_API_PASS}"'"},
+                "id":      1
+            }' | grep -oP '"result":"\K[^"]+')
+
+        if [ -n "$API_TOKEN" ]; then
+            log "  [OK] Login na API realizado."
+            
+            # Buscar IDs dos templates
+            TEMPLATE_IDS=$(curl -k -s -X POST "${ZABBIX_API_URL}" \
+                -H "Content-Type: application/json" \
+                -d '{"jsonrpc":"2.0","method":"template.get","params":{"output":["templateid"]},"auth":"'"${API_TOKEN}"'","id":2}' | \
+                python3 -c "import sys, json; data=json.load(sys.stdin); print(','.join([t['templateid'] for t in data.get('result',[])]))" 2>/dev/null)
+
+            if [ -n "$TEMPLATE_IDS" ]; then
+                log "  [+] Exportando Templates (inclui LLD, Triggers e Itens)..."
+                curl -k -s -X POST "${ZABBIX_API_URL}" \
+                    -H "Content-Type: application/json" \
+                    -d '{"jsonrpc":"2.0","method":"configuration.export","params":{"options":{"templates":['"$(echo "$TEMPLATE_IDS" | sed 's/,/","/g' | sed 's/^/"/' | sed 's/$/"/')"']}, "format":"xml"}, "auth":"'"${API_TOKEN}"'", "id":3}' | \
+                    python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('result', ''))" 2>/dev/null > "${API_DIR}/templates_completos.xml"
+            fi
+
+            log "  [+] Exportando Value Mappings..."
+            curl -k -s -X POST "${ZABBIX_API_URL}" \
+                -H "Content-Type: application/json" \
+                -d '{"jsonrpc": "2.0","method": "valuemap.get","params": {"output": "extend", "selectMappings": "extend"},"auth": "'"${API_TOKEN}"'","id": 4}' | \
+                python3 -c "import sys, json; json.dump(json.load(sys.stdin).get('result', []), sys.stdout, indent=2)" 2>/dev/null > "${API_DIR}/value_mappings.json"
+
+            log "  [+] Exportando Macros Globais..."
+            curl -k -s -X POST "${ZABBIX_API_URL}" \
+                -H "Content-Type: application/json" \
+                -d '{"jsonrpc": "2.0","method": "usermacro.get","params": {"output": "extend", "globalmacro": true},"auth": "'"${API_TOKEN}"'","id": 5}' | \
+                python3 -c "import sys, json; json.dump(json.load(sys.stdin).get('result', []), sys.stdout, indent=2)" 2>/dev/null > "${API_DIR}/macros_globais.json"
+
+            # Fazer logout seguro da API
+            curl -k -s -X POST "${ZABBIX_API_URL}" -H "Content-Type: application/json" -d '{"jsonrpc": "2.0","method": "user.logout","params": [],"auth": "'"${API_TOKEN}"'","id": 6}' >/dev/null
+        else
+            log "  [ERRO] Nao foi possivel autenticar na API. (Verifique o usuario e a senha ou conectividade HTTPS)."
+        fi
+    else
+        log "  [ERRO] curl nao instalado. Impossivel realizar o dump."
+    fi
+fi
+
+# ===========================================================================
+# 4. COMMIT & PUSH
+# ===========================================================================
+log ">>> Enviando ao repositório GitLab..."
+cd "$GIT_REPO_LOCAL"
+
+git add -A "${HOSTNAME_ID}/" 2>>"$LOG_FILE"
+
+if git diff --cached --quiet 2>/dev/null; then
+    log "  Nenhuma alteracao de configuracao nesta execucao."
+else
+    git commit -m "backup(${HOSTNAME_ID}): $(date '+%Y-%m-%d %H:%M')" 2>>"$LOG_FILE"
+    
+    # Adicionando um retry caso 2 servidores queiram enviar coisas ao mesmo tempo
+    PUSH_OK=0
+    for tentar in 1 2 3; do
+        if git push origin "$GIT_BRANCH" 2>>"$LOG_FILE"; then
+            PUSH_OK=1
+            log "  [OK] Alteracoes enviadas com sucesso!"
+            break
+        else
+            log "  [RETRY] Houve atualizacoes distantes, tentando rebase... (Tentativa $tentar/3)"
+            git pull --rebase origin "$GIT_BRANCH" 2>>"$LOG_FILE" || true
+            sleep $((RANDOM % 10 + 5))
+        fi
+    done
+    if [ "$PUSH_OK" -eq 0 ]; then
+        log "  [ERRO] Falha ao enviar para o GitLab apos as tentativas."
+    fi
+fi
+
+log "============================================================"
+log "FIM DO BACKUP - ${HOSTNAME_ID}"
+log "============================================================"

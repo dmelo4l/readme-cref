@@ -1,0 +1,184 @@
+#!/bin/bash
+###############################################################################
+# teste_conexao.sh - Testa conectividade com GitLab e API Zabbix
+###############################################################################
+
+echo "============================================"
+echo "TESTE DE CONECTIVIDADE - $(hostname)"
+echo "============================================"
+echo ""
+
+# --- Credenciais ---
+GIT_USER="usr_zabbix"
+GIT_PASS_RAW="bolodoido@123"
+GIT_PASS_ENCODED="bolodoido%40123"
+GIT_HOST="gitlab.local"
+GIT_PROJECT="zbx/Zabbix"
+
+ZABBIX_API_URL="https://zbx-web.crefisa.com.br/zabbix/api_jsonrpc.php"
+ZABBIX_API_USER="usr_zabbix_prd"
+ZABBIX_API_PASS='P#UD7!5ohr'
+
+echo "======== TESTE 1: Resolucao DNS ========"
+echo ""
+
+echo -n "  gitlab.local: "
+if host gitlab.local >/dev/null 2>&1; then
+    host gitlab.local | head -1
+else
+    nslookup gitlab.local 2>/dev/null | grep -A1 "Name:" || echo "FALHA - nao resolveu DNS"
+fi
+
+echo -n "  zbx-web.crefisa.com.br: "
+if host zbx-web.crefisa.com.br >/dev/null 2>&1; then
+    host zbx-web.crefisa.com.br | head -1
+else
+    nslookup zbx-web.crefisa.com.br 2>/dev/null | grep -A1 "Name:" || echo "FALHA - nao resolveu DNS"
+fi
+
+echo ""
+echo "======== TESTE 2: Conectividade de Rede (porta) ========"
+echo ""
+
+echo -n "  gitlab.local:443 (HTTPS): "
+if timeout 5 bash -c "echo >/dev/tcp/gitlab.local/443" 2>/dev/null; then
+    echo "OK - porta aberta"
+else
+    echo "FALHA - porta fechada ou host inacessivel"
+fi
+
+echo -n "  gitlab.local:80 (HTTP): "
+if timeout 5 bash -c "echo >/dev/tcp/gitlab.local/80" 2>/dev/null; then
+    echo "OK - porta aberta"
+else
+    echo "FALHA - porta fechada"
+fi
+
+echo -n "  zbx-web.crefisa.com.br:443 (HTTPS): "
+if timeout 5 bash -c "echo >/dev/tcp/zbx-web.crefisa.com.br/443" 2>/dev/null; then
+    echo "OK - porta aberta"
+else
+    echo "FALHA - porta fechada ou host inacessivel"
+fi
+
+echo ""
+echo "======== TESTE 3: Curl no GitLab ========"
+echo ""
+
+echo "  Tentando HTTPS..."
+HTTP_CODE=$(curl -k -s -o /dev/null -w "%{http_code}" "https://gitlab.local/" 2>/dev/null)
+echo "  https://gitlab.local/ -> HTTP $HTTP_CODE"
+
+echo "  Tentando HTTP..."
+HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "http://gitlab.local/" 2>/dev/null)
+echo "  http://gitlab.local/  -> HTTP $HTTP_CODE"
+
+echo ""
+echo "======== TESTE 4: Git Clone (varias formas) ========"
+echo ""
+
+export GIT_TERMINAL_PROMPT=0
+export GIT_SSL_NO_VERIFY=1
+TMPDIR_GIT=$(mktemp -d /tmp/teste_git_XXXX)
+
+# Forma 1: HTTPS com senha encoded
+echo "  [4a] git clone https://${GIT_USER}:***@${GIT_HOST}/${GIT_PROJECT}.git"
+GIT_OUTPUT=$(git clone "https://${GIT_USER}:${GIT_PASS_ENCODED}@${GIT_HOST}/${GIT_PROJECT}.git" "${TMPDIR_GIT}/teste1" 2>&1)
+if [ $? -eq 0 ]; then
+    echo "       SUCESSO!"
+else
+    echo "       FALHA: $GIT_OUTPUT"
+fi
+
+# Forma 2: HTTP (sem SSL)
+echo "  [4b] git clone http://${GIT_USER}:***@${GIT_HOST}/${GIT_PROJECT}.git"
+GIT_OUTPUT=$(git clone "http://${GIT_USER}:${GIT_PASS_ENCODED}@${GIT_HOST}/${GIT_PROJECT}.git" "${TMPDIR_GIT}/teste2" 2>&1)
+if [ $? -eq 0 ]; then
+    echo "       SUCESSO!"
+else
+    echo "       FALHA: $GIT_OUTPUT"
+fi
+
+# Forma 3: Usando credential helper ao inves de inline
+echo "  [4c] git clone com credential helper..."
+git config --global credential.helper store 2>/dev/null
+echo "https://${GIT_USER}:${GIT_PASS_ENCODED}@${GIT_HOST}" > ~/.git-credentials
+chmod 600 ~/.git-credentials 2>/dev/null
+GIT_OUTPUT=$(git clone "https://${GIT_HOST}/${GIT_PROJECT}.git" "${TMPDIR_GIT}/teste3" 2>&1)
+if [ $? -eq 0 ]; then
+    echo "       SUCESSO!"
+else
+    echo "       FALHA: $GIT_OUTPUT"
+fi
+
+# Forma 4: Usando .netrc
+echo "  [4d] git clone com .netrc..."
+echo "machine ${GIT_HOST} login ${GIT_USER} password ${GIT_PASS_RAW}" > ~/.netrc
+chmod 600 ~/.netrc 2>/dev/null
+GIT_OUTPUT=$(git clone "https://${GIT_HOST}/${GIT_PROJECT}.git" "${TMPDIR_GIT}/teste4" 2>&1)
+if [ $? -eq 0 ]; then
+    echo "       SUCESSO!"
+else
+    echo "       FALHA: $GIT_OUTPUT"
+fi
+
+# Limpar
+rm -rf "$TMPDIR_GIT"
+rm -f ~/.git-credentials ~/.netrc
+git config --global --unset credential.helper 2>/dev/null
+
+echo ""
+echo "======== TESTE 5: API Zabbix ========"
+echo ""
+
+echo "  URL: ${ZABBIX_API_URL}"
+echo "  Usuario: ${ZABBIX_API_USER}"
+echo ""
+
+echo -n "  [5a] Versao da API: "
+API_VERSION=$(curl -k -s -X POST "${ZABBIX_API_URL}" \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"apiinfo.version","params":[],"id":1}' 2>/dev/null)
+echo "$API_VERSION"
+
+echo ""
+echo -n "  [5b] Login na API: "
+API_LOGIN=$(curl -k -s -X POST "${ZABBIX_API_URL}" \
+    -H "Content-Type: application/json" \
+    -d '{"jsonrpc":"2.0","method":"user.login","params":{"username":"'"${ZABBIX_API_USER}"'","password":"'"${ZABBIX_API_PASS}"'"},"id":2}' 2>/dev/null)
+echo "$API_LOGIN"
+
+TOKEN=$(echo "$API_LOGIN" | grep -oP '"result":"\K[^"]+' 2>/dev/null)
+if [ -n "$TOKEN" ]; then
+    echo "       TOKEN OBTIDO: ${TOKEN:0:10}..."
+    
+    echo -n "  [5c] Contando templates: "
+    TEMPLATES=$(curl -k -s -X POST "${ZABBIX_API_URL}" \
+        -H "Content-Type: application/json" \
+        -d '{"jsonrpc":"2.0","method":"template.get","params":{"countOutput":true},"auth":"'"${TOKEN}"'","id":3}' 2>/dev/null)
+    echo "$TEMPLATES"
+
+    # Logout
+    curl -k -s -X POST "${ZABBIX_API_URL}" -H "Content-Type: application/json" \
+        -d '{"jsonrpc":"2.0","method":"user.logout","params":[],"auth":"'"${TOKEN}"'","id":4}' >/dev/null
+else
+    echo "       FALHA NO LOGIN - nao obteve token"
+fi
+
+echo ""
+echo "======== TESTE 6: Verificacoes do Sistema ========"
+echo ""
+
+echo -n "  Git instalado: "
+git --version 2>/dev/null || echo "NAO INSTALADO"
+
+echo -n "  Curl instalado: "
+curl --version 2>/dev/null | head -1 || echo "NAO INSTALADO"
+
+echo -n "  Python3 instalado: "
+python3 --version 2>/dev/null || echo "NAO INSTALADO"
+
+echo ""
+echo "============================================"
+echo "FIM DOS TESTES"
+echo "============================================"

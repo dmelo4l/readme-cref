@@ -1,20 +1,24 @@
-## 1. Apagar o repo local antigo (deixa o script recriar)
+# 1. Copie o conteudo atualizado do script "backup_zabbix_basico.sh" 
+```bash
+vim /usr/local/bin/backup_zabbix.sh
+```
+
+# 2. SEGREDO: Limpe quebras de linha defeituosas do Windows antes de qualquer coisa
+```bash
+sed -i 's/\r//' /usr/local/bin/backup_zabbix.sh
+```
+
+# 3. Limpe algum lixo que possa ter ficado da tentativa antiga 
 ```bash
 rm -rf /var/backups/backup-zabbix-repo
 ```
 
-## 2. Atualizar o script (cole o conteúdo novo)
+# 4. Ajuste permissoes e GO!
 ```bash
-vi /usr/local/bin/backup_zabbix.sh
-```
-
-## 3. Limpar CRLF e executar
-```bash
-sed -i 's/\r//' /usr/local/bin/backup_zabbix.sh
+chmod +x /usr/local/bin/backup_zabbix.sh
 
 /usr/local/bin/backup_zabbix.sh
 ```
-
 
 
 ## Para adicionar ao cron, execute no servidor como root:

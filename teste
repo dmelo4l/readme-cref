@@ -16,7 +16,7 @@ GIT_USER="usr_zabbix"
 GIT_TOKEN="xzeeQpPycx7tT6HBh1Ks"
 GIT_HOST="gitlab.local"
 GIT_PROJECT="zbx/Zabbix"
-GIT_BRANCH="master"
+GIT_BRANCH="backups"          # Branch dedicada aos backups automaticos (nao protegida)
 
 # A URL final de conexao ao GitLab via HTTPS usando Token
 GIT_REPO_URL="https://${GIT_USER}:${GIT_TOKEN}@${GIT_HOST}/${GIT_PROJECT}.git"
@@ -72,17 +72,30 @@ export GIT_TERMINAL_PROMPT=0
 export GIT_SSL_NO_VERIFY=1
 
 if [ ! -d "${GIT_REPO_LOCAL}/.git" ]; then
-    log ">>> Clonando repositorio GitLab..."
-    git clone "$GIT_REPO_URL" "$GIT_REPO_LOCAL" 2>>"$LOG_FILE" || {
-        log "[FATAL] Falha ao clonar repositorio Git. URL verificada: https://${GIT_USER}@${GIT_HOST}/${GIT_PROJECT}.git"
+    log ">>> Clonando repositorio GitLab (branch master)..."
+    git clone --branch master "$GIT_REPO_URL" "$GIT_REPO_LOCAL" 2>>"$LOG_FILE" || {
+        log "[FATAL] Falha ao clonar repositorio Git. URL: https://${GIT_USER}@${GIT_HOST}/${GIT_PROJECT}.git"
         exit 1
     }
+    cd "$GIT_REPO_LOCAL"
+    # Cria a branch 'backups' a partir da master, se ainda nao existir no remoto
+    if git ls-remote --exit-code --heads origin "$GIT_BRANCH" 2>/dev/null; then
+        log ">>> Branch '${GIT_BRANCH}' ja existe no remoto. Fazendo checkout..."
+        git checkout -b "$GIT_BRANCH" origin/"$GIT_BRANCH" 2>>"$LOG_FILE"
+    else
+        log ">>> Criando branch '${GIT_BRANCH}' a partir da master..."
+        git checkout -b "$GIT_BRANCH" 2>>"$LOG_FILE"
+        git push -u origin "$GIT_BRANCH" 2>>"$LOG_FILE" || {
+            log "[FATAL] Falha ao criar branch '${GIT_BRANCH}' no GitLab."
+            exit 1
+        }
+    fi
 else
     log ">>> Atualizando repositorio com rebase..."
     cd "$GIT_REPO_LOCAL"
     git remote set-url origin "$GIT_REPO_URL"
     git fetch origin 2>>"$LOG_FILE"
-    git checkout "$GIT_BRANCH" 2>>"$LOG_FILE" || git checkout -b "$GIT_BRANCH" 2>>"$LOG_FILE"
+    git checkout "$GIT_BRANCH" 2>>"$LOG_FILE" || git checkout -b "$GIT_BRANCH" origin/master 2>>"$LOG_FILE"
     git pull --rebase origin "$GIT_BRANCH" 2>>"$LOG_FILE" || true
 fi
 
@@ -203,18 +216,113 @@ if systemctl is-active --quiet zabbix-server || [[ "$HOSTNAME_ID" == *"web"* ]] 
 fi
 
 # ===========================================================================
-# 4. COMMIT & PUSH
+# 4. GERAR README.md NA RAIZ DO REPOSITORIO
+# ===========================================================================
+log ">>> Atualizando README.md do repositorio..."
+
+README_FILE="${GIT_REPO_LOCAL}/README.md"
+
+{
+    echo "# Backup de Configurações Zabbix - Crefisa"
+    echo ""
+    echo "> Repositório gerado automaticamente por script de backup."
+    echo "> Última atualização por **${HOSTNAME_ID}** em \`$(date '+%Y-%m-%d %H:%M:%S')\`"
+    echo ""
+    echo "---"
+    echo ""
+    echo "## Estrutura do Repositório"
+    echo ""
+    echo "Cada servidor possui sua própria pasta nomeada com o **hostname** da máquina."
+    echo "Dentro de cada pasta, os arquivos são organizados por tipo de serviço:"
+    echo ""
+    echo "| Subpasta | Conteúdo |"
+    echo "|---|---|"
+    echo "| \`zabbix-server/\` | \`zabbix_server.conf\`, alertscripts, externalscripts |"
+    echo "| \`zabbix-proxy/\` | \`zabbix_proxy.conf\` |"
+    echo "| \`zabbix-agent/\` | \`zabbix_agentd.conf\` e includes (.d/) |"
+    echo "| \`zabbix-agent2/\` | \`zabbix_agent2.conf\` e includes (.d/) |"
+    echo "| \`zabbix-lib/\` | Arquivos de \`/var/lib/zabbix/\` (scripts, certs, MIBs) |"
+    echo "| \`zabbix-api-export/\` | Templates XML, Value Mappings JSON, Macros Globais JSON |"
+    echo "| \`postgresql/\` | \`postgresql.conf\`, \`pg_hba.conf\`, \`pg_ident.conf\` |"
+    echo "| \`haproxy/\` | \`haproxy.cfg\` e arquivos de \`conf.d/\` |"
+    echo ""
+    echo "---"
+    echo ""
+    echo "## Servidores com Backup Ativo"
+    echo ""
+
+    # Lista dinamicamente todas as pastas de servidor que existem no repo
+    SERVERS_ENCONTRADOS=0
+    for servidor_dir in "${GIT_REPO_LOCAL}"/*/; do
+        servidor=$(basename "$servidor_dir")
+        # Ignora arquivos/pastas de controle do git
+        [ "$servidor" = ".git" ] && continue
+        [ ! -d "$servidor_dir" ] && continue
+
+        SERVERS_ENCONTRADOS=$((SERVERS_ENCONTRADOS + 1))
+        echo "### 📦 \`${servidor}\`"
+        echo ""
+
+        # Lista subpastas existentes
+        for subdir in "$servidor_dir"*/; do
+            [ ! -d "$subdir" ] && continue
+            subpasta=$(basename "$subdir")
+            # Conta arquivos dentro da subpasta
+            num_arquivos=$(find "$subdir" -maxdepth 1 -type f 2>/dev/null | wc -l)
+            echo "- \`${subpasta}/\` — ${num_arquivos} arquivo(s)"
+            # Lista os arquivos
+            while IFS= read -r arq; do
+                echo "  - \`$(basename "$arq")\`"
+            done < <(find "$subdir" -maxdepth 1 -type f 2>/dev/null | sort)
+        done
+        echo ""
+    done
+
+    if [ "$SERVERS_ENCONTRADOS" -eq 0 ]; then
+        echo "_Nenhum servidor com backup registrado ainda._"
+        echo ""
+    fi
+
+    echo "---"
+    echo ""
+    echo "## Fluxo de Backup"
+    echo ""
+    echo "\`\`\`"
+    echo "Cron (diário às 03:00)  →  Script coleta arquivos  →  Push para branch 'backups'"
+    echo "                                                               ↓"
+    echo "                                             Revisar e fazer Merge Request → master"
+    echo "\`\`\`"
+    echo ""
+    echo "## Restauração (DR)"
+    echo ""
+    echo "Para restaurar as configurações em caso de desastre:"
+    echo ""
+    echo "1. Clone este repositório na máquina de destino"
+    echo "2. Copie os arquivos da pasta do servidor desejado para seus locais originais"
+    echo "3. Para reimportar templates no Zabbix, use: **Configuração → Templates → Importar** e selecione o arquivo \`templates_completos.xml\`"
+    echo "4. Para reimportar Value Mappings, use a API ou interface web do Zabbix"
+    echo ""
+    echo "> **Atenção:** Os arquivos \`.conf\` podem conter credenciais. Mantenha este repositório com acesso restrito."
+
+} > "$README_FILE"
+
+log "  [OK] README.md atualizado."
+
+# ===========================================================================
+# 5. COMMIT & PUSH
 # ===========================================================================
 log ">>> Enviando ao repositório GitLab..."
 cd "$GIT_REPO_LOCAL"
 
-git add -A "${HOSTNAME_ID}/" 2>>"$LOG_FILE"
+# Adiciona os arquivos do servidor E o README atualizado
+git add -A "${HOSTNAME_ID}/" README.md 2>>"$LOG_FILE"
 
 if git diff --cached --quiet 2>/dev/null; then
     log "  Nenhuma alteracao de configuracao nesta execucao."
 else
     git commit -m "backup(${HOSTNAME_ID}): $(date '+%Y-%m-%d %H:%M')" 2>>"$LOG_FILE"
 fi
+
 
 # Sempre tenta push (tambem envia commits presos de execucoes anteriores)
 PUSH_OK=0

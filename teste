@@ -16,7 +16,7 @@ GIT_USER="usr_zabbix"
 GIT_TOKEN="xzeeQpPycx7tT6HBh1Ks"
 GIT_HOST="gitlab.local"
 GIT_PROJECT="zbx/Zabbix"
-GIT_BRANCH="main"
+GIT_BRANCH="master"
 
 # A URL final de conexao ao GitLab via HTTPS usando Token
 GIT_REPO_URL="https://${GIT_USER}:${GIT_TOKEN}@${GIT_HOST}/${GIT_PROJECT}.git"
@@ -214,23 +214,23 @@ if git diff --cached --quiet 2>/dev/null; then
     log "  Nenhuma alteracao de configuracao nesta execucao."
 else
     git commit -m "backup(${HOSTNAME_ID}): $(date '+%Y-%m-%d %H:%M')" 2>>"$LOG_FILE"
-    
-    # Adicionando um retry caso 2 servidores queiram enviar coisas ao mesmo tempo
-    PUSH_OK=0
-    for tentar in 1 2 3; do
-        if git push origin "$GIT_BRANCH" 2>>"$LOG_FILE"; then
-            PUSH_OK=1
-            log "  [OK] Alteracoes enviadas com sucesso!"
-            break
-        else
-            log "  [RETRY] Houve atualizacoes distantes, tentando rebase... (Tentativa $tentar/3)"
-            git pull --rebase origin "$GIT_BRANCH" 2>>"$LOG_FILE" || true
-            sleep $((RANDOM % 10 + 5))
-        fi
-    done
-    if [ "$PUSH_OK" -eq 0 ]; then
-        log "  [ERRO] Falha ao enviar para o GitLab apos as tentativas."
+fi
+
+# Sempre tenta push (tambem envia commits presos de execucoes anteriores)
+PUSH_OK=0
+for tentar in 1 2 3; do
+    if git push origin "$GIT_BRANCH" 2>>"$LOG_FILE"; then
+        PUSH_OK=1
+        log "  [OK] Alteracoes enviadas com sucesso!"
+        break
+    else
+        log "  [RETRY] Houve atualizacoes distantes, tentando rebase... (Tentativa $tentar/3)"
+        git pull --rebase origin "$GIT_BRANCH" 2>>"$LOG_FILE" || true
+        sleep $((RANDOM % 10 + 5))
     fi
+done
+if [ "$PUSH_OK" -eq 0 ]; then
+    log "  [ERRO] Falha ao enviar para o GitLab apos as tentativas."
 fi
 
 log "============================================================"

@@ -2,405 +2,318 @@
 ###############################################################################
 # backup_zabbix_basico.sh
 #
-# Backup simplificado e automatizado. Verifica os servicos ativos localmente
-# e faz backup apenas dos configuracoes necessarias (server, proxies, agentes,
-# postgres, haproxy, e exports da API).
+# Coleta apenas os arquivos ESSENCIAIS para Disaster Recovery:
+#   - Configs principais do Zabbix (server, proxy, agente)
+#   - Includes dos agentes (.d/)
+#   - PostgreSQL (postgresql.conf, pg_hba.conf)
+#   - HAProxy (haproxy.cfg)
+#   - Export via API: Templates, Value Mappings, Macros Globais
+#
+# Usa /tmp como area de trabalho e limpa tudo apos o push.
 ###############################################################################
 
 set -uo pipefail
 
 # ===========================================================================
-# CREDENCIAIS E CONFIGURACOES
+# CONFIGURACOES
 # ===========================================================================
 GIT_USER="usr_zabbix"
 GIT_TOKEN="xzeeQpPycx7tT6HBh1Ks"
 GIT_HOST="gitlab.local"
 GIT_PROJECT="zbx/Zabbix"
-GIT_BRANCH="backups"          # Branch dedicada aos backups automaticos
-
-# A URL final de conexao ao GitLab via HTTPS usando Token
+GIT_BRANCH="backups"
 GIT_REPO_URL="https://${GIT_USER}:${GIT_TOKEN}@${GIT_HOST}/${GIT_PROJECT}.git"
 
-# Onde o repositorio ficara na maquina alvo
-GIT_REPO_LOCAL="/var/backups/backup-zabbix-repo"
-
-# API Zabbix 
 ZABBIX_API_URL="https://zbx-web.crefisa.com.br/zabbix/api_jsonrpc.php"
 ZABBIX_API_USER="usr_zabbix_prd"
 ZABBIX_API_PASS="P#UD7!5ohr"
 
-# Variaveis de execucao
 HOSTNAME_ID=$(hostname -s | tr '[:upper:]' '[:lower:]')
-DEST="${GIT_REPO_LOCAL}/${HOSTNAME_ID}"
 LOG_FILE="/var/log/backup_zabbix_basico.log"
 
+# Area de trabalho temporaria - removida apos o push
+GIT_REPO_LOCAL=$(mktemp -d /tmp/backup-zabbix-XXXX)
+
+DEST="${GIT_REPO_LOCAL}/${HOSTNAME_ID}"
+
 # ===========================================================================
-# FUNCOES AUXILIARES
+# FUNCOES
 # ===========================================================================
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
+# Copia um arquivo para a subpasta de destino, apenas se ele existir
 coletar() {
     local subpasta="$1"
-    shift
+    local origem="$2"
+    local destino="${DEST}/${subpasta}"
+
+    [ ! -e "$origem" ] && return
+    mkdir -p "$destino"
+    cp -p "$origem" "$destino/" 2>/dev/null && \
+        log "  [OK] ${subpasta}/$(basename "$origem")" || \
+        log "  [ERRO] Falha ao copiar: ${origem}"
+}
+
+# Copia todos os arquivos (nao recursivo) de um diretorio
+coletar_dir() {
+    local subpasta="$1"
+    local dir="$2"
+    [ ! -d "$dir" ] && return
     local destino="${DEST}/${subpasta}"
     mkdir -p "$destino"
-
-    for origem in "$@"; do
-        local encontrados
-        encontrados=$(compgen -G "$origem" 2>/dev/null || true)
-        for item in $encontrados; do
-            if [ -e "$item" ]; then
-                cp -rL "$item" "$destino/" 2>/dev/null && \
-                    log "  [OK] Copiado: ${subpasta}/$(basename "$item")" || \
-                    log "  [ERRO] Falha ao copiar: $item"
-            fi
-        done
+    for f in "$dir"/*; do
+        [ -f "$f" ] && cp -p "$f" "$destino/" 2>/dev/null && \
+            log "  [OK] ${subpasta}/$(basename "$f")"
     done
 }
 
 # ===========================================================================
-# 1. PREPARACAO DO REPOSITORIO
+# 1. PREPARAR REPOSITORIO GIT EM /tmp
 # ===========================================================================
 log "============================================================"
-log "INICIANDO BACKUP BASICO - ${HOSTNAME_ID}"
+log "INICIANDO BACKUP - ${HOSTNAME_ID}"
 log "============================================================"
 
-# Desabilita o prompt pedindo senha do git (importante para script) e valida SSL
 export GIT_TERMINAL_PROMPT=0
 export GIT_SSL_NO_VERIFY=1
 
-if [ ! -d "${GIT_REPO_LOCAL}/.git" ]; then
-    log ">>> Clonando repositorio GitLab (branch master)..."
-    git clone --branch master "$GIT_REPO_URL" "$GIT_REPO_LOCAL" 2>>"$LOG_FILE" || {
-        log "[FATAL] Falha ao clonar repositorio Git. URL: https://${GIT_USER}@${GIT_HOST}/${GIT_PROJECT}.git"
-        exit 1
-    }
-    cd "$GIT_REPO_LOCAL"
-    # Cria a branch 'backups' a partir da master, se ainda nao existir no remoto
-    if git ls-remote --exit-code --heads origin "$GIT_BRANCH" 2>/dev/null; then
-        log ">>> Branch '${GIT_BRANCH}' ja existe no remoto. Fazendo checkout..."
-        git checkout -b "$GIT_BRANCH" origin/"$GIT_BRANCH" 2>>"$LOG_FILE"
-    else
-        log ">>> Criando branch '${GIT_BRANCH}' a partir da master..."
-        git checkout -b "$GIT_BRANCH" 2>>"$LOG_FILE"
-        git push -u origin "$GIT_BRANCH" 2>>"$LOG_FILE" || {
-            log "[FATAL] Falha ao criar branch '${GIT_BRANCH}' no GitLab."
-            exit 1
-        }
-    fi
-else
-    log ">>> Atualizando repositorio com rebase..."
-    cd "$GIT_REPO_LOCAL"
-    git remote set-url origin "$GIT_REPO_URL"
-    git fetch origin 2>>"$LOG_FILE"
-    git checkout "$GIT_BRANCH" 2>>"$LOG_FILE" || git checkout -b "$GIT_BRANCH" origin/master 2>>"$LOG_FILE"
-    git pull --rebase origin "$GIT_BRANCH" 2>>"$LOG_FILE" || true
-fi
+log ">>> Clonando repositorio GitLab em ${GIT_REPO_LOCAL}..."
+git clone --branch master "$GIT_REPO_URL" "$GIT_REPO_LOCAL" 2>>"$LOG_FILE" || {
+    log "[FATAL] Falha ao clonar repositorio."
+    rm -rf "$GIT_REPO_LOCAL"
+    exit 1
+}
 
 cd "$GIT_REPO_LOCAL"
-git config user.email "${GIT_USER}@crefisa.com.br" 2>/dev/null
-git config user.name "Backup Zabbix - ${HOSTNAME_ID}" 2>/dev/null
 
-log ">>> Limpando pasta local do servidor: ${HOSTNAME_ID}/"
+# Cria/troca para branch de backups
+if git ls-remote --exit-code --heads origin "$GIT_BRANCH" 2>/dev/null; then
+    git checkout -b "$GIT_BRANCH" origin/"$GIT_BRANCH" 2>>"$LOG_FILE"
+else
+    log ">>> Criando branch '${GIT_BRANCH}'..."
+    git checkout -b "$GIT_BRANCH" 2>>"$LOG_FILE"
+    git push -u origin "$GIT_BRANCH" 2>>"$LOG_FILE" || {
+        log "[FATAL] Falha ao criar branch '${GIT_BRANCH}' no GitLab."
+        rm -rf "$GIT_REPO_LOCAL"
+        exit 1
+    }
+fi
+
+git config user.email "${GIT_USER}@crefisa.com.br"
+git config user.name "Backup Zabbix - ${HOSTNAME_ID}"
+
+# Recria pasta limpa deste servidor
 rm -rf "$DEST"
 mkdir -p "$DEST"
 
 # ===========================================================================
-# 2. COLETA DE ARQUIVOS ZABBIX
+# 2. COLETA DE CONFIGURACOES ESSENCIAIS
 # ===========================================================================
-log ">>> Coletando arquivos de configuracao Zabbix..."
-
-# --- Funcao auxiliar: busca arquivo por nome em locais comuns e copia ---
-buscar_e_coletar() {
-    local subpasta="$1"
-    local nome_arquivo="$2"
-    local encontrado=0
-
-    while IFS= read -r caminho; do
-        [ -f "$caminho" ] || continue
-        coletar "$subpasta" "$caminho"
-        encontrado=1
-    done < <(find /etc /usr/lib /var/lib /opt /usr/local/etc \
-                  -name "$nome_arquivo" -type f 2>/dev/null)
-
-    [ "$encontrado" -eq 0 ] && log "  [INFO] Arquivo nao encontrado no sistema: ${nome_arquivo}"
-}
+log ">>> Coletando arquivos de configuracao..."
 
 # --- Zabbix Server ---
-log "  Verificando Zabbix Server..."
-buscar_e_coletar "zabbix-server" "zabbix_server.conf"
-# Alertscripts e externalscripts (qualquer local)
-for dir in /usr/lib/zabbix/alertscripts /usr/local/lib/zabbix/alertscripts \
-           /usr/lib/zabbix/externalscripts /usr/local/lib/zabbix/externalscripts; do
-    [ -d "$dir" ] && coletar "zabbix-server/$(basename "$dir")" "$dir"/*
-done
+coletar "zabbix-server" "/etc/zabbix/zabbix_server.conf"
 
 # --- Zabbix Proxy ---
-log "  Verificando Zabbix Proxy..."
-buscar_e_coletar "zabbix-proxy" "zabbix_proxy.conf"
+coletar "zabbix-proxy" "/etc/zabbix/zabbix_proxy.conf"
 
-# --- Zabbix Agent (versao C / daemon) ---
-log "  Verificando Zabbix Agent..."
-buscar_e_coletar "zabbix-agent" "zabbix_agentd.conf"
-# Includes do agent (.d/)
-for inc_dir in /etc/zabbix/zabbix_agentd.d /usr/local/etc/zabbix/zabbix_agentd.d; do
-    if [ -d "$inc_dir" ]; then
-        log "    Coletando includes de: $inc_dir"
-        coletar "zabbix-agent/agentd.d" "$inc_dir"/*
-    fi
-done
+# --- Zabbix Agent (versao C) ---
+coletar "zabbix-agent" "/etc/zabbix/zabbix_agentd.conf"
+coletar_dir "zabbix-agent/agentd.d" "/etc/zabbix/zabbix_agentd.d"
 
 # --- Zabbix Agent 2 (versao Go) ---
-log "  Verificando Zabbix Agent2..."
-buscar_e_coletar "zabbix-agent2" "zabbix_agent2.conf"
-# Includes do agent2 (.d/)
-for inc_dir in /etc/zabbix/zabbix_agent2.d /usr/local/etc/zabbix/zabbix_agent2.d; do
-    if [ -d "$inc_dir" ]; then
-        log "    Coletando includes de: $inc_dir"
-        coletar "zabbix-agent2/agent2.d" "$inc_dir"/*
-    fi
+coletar "zabbix-agent2" "/etc/zabbix/zabbix_agent2.conf"
+coletar_dir "zabbix-agent2/agent2.d" "/etc/zabbix/zabbix_agent2.d"
+
+# --- PostgreSQL ---
+for pg_dir in \
+    /etc/postgresql/*/main \
+    /var/lib/pgsql/*/data \
+    /var/lib/pgsql/data; do
+    [ -d "$pg_dir" ] || continue
+    coletar "postgresql" "${pg_dir}/postgresql.conf"
+    coletar "postgresql" "${pg_dir}/pg_hba.conf"
 done
 
-# --- Varredura geral: qualquer .conf relacionado a zabbix em /etc ---
-log "  Varredura geral em /etc por arquivos zabbix..."
-while IFS= read -r arq; do
-    # Evita duplicar arquivos ja coletados acima
-    nome=$(basename "$arq")
-    case "$nome" in
-        zabbix_server.conf|zabbix_proxy.conf|zabbix_agentd.conf|zabbix_agent2.conf)
-            continue ;;  # ja coletado acima
-    esac
-    coletar "zabbix-outros" "$arq"
-done < <(find /etc -iname "*zabbix*" -type f 2>/dev/null | sort)
+# --- HAProxy ---
+coletar "haproxy" "/etc/haproxy/haproxy.cfg"
+coletar_dir "haproxy/conf.d" "/etc/haproxy/conf.d"
 
-# --- /var/lib/zabbix (scripts customizados, certs, MIBs) ---
-log "  Coletando /var/lib/zabbix/..."
-if [ -d /var/lib/zabbix ]; then
-    # Percorre recursivamente mas copia arquivo a arquivo mantendo estrutura
-    while IFS= read -r arq; do
-        # Calcula subpasta relativa ex: /var/lib/zabbix/scripts/x.sh -> zabbix-lib/scripts
-        subrel=$(dirname "$arq" | sed 's|/var/lib/zabbix||' | sed 's|^/||')
-        subpasta="zabbix-lib"
-        [ -n "$subrel" ] && subpasta="zabbix-lib/${subrel}"
-        coletar "$subpasta" "$arq"
-    done < <(find /var/lib/zabbix -type f 2>/dev/null | sort)
-fi
-
-# --- Informacao sobre servicos (mesmo se parado, mostra o estado) ---
-log "  Registrando estado dos servicos Zabbix..."
-SVCDIR="${DEST}/00-inventario"
-mkdir -p "$SVCDIR"
+# --- Inventario minimo ---
+mkdir -p "${DEST}/00-inventario"
 {
-    echo "=== Estado dos servicos Zabbix em $(hostname) - $(date) ==="
+    echo "=== Inventario: $(hostname) - $(date) ==="
+    echo ""
+    echo "--- OS ---"
+    cat /etc/os-release 2>/dev/null
+    echo ""
+    echo "--- Kernel ---"
+    uname -a
+    echo ""
+    echo "--- Servicos Zabbix ---"
     for svc in zabbix-server zabbix-proxy zabbix-agent zabbix-agent2; do
         status=$(systemctl is-active "$svc" 2>/dev/null || echo "nao-instalado")
         enabled=$(systemctl is-enabled "$svc" 2>/dev/null || echo "nao-instalado")
-        echo "  $svc: status=$status | enabled=$enabled"
+        echo "  $svc: $status (enabled: $enabled)"
     done
-} > "${SVCDIR}/zabbix_servicos.txt"
-log "  [OK] Estado dos servicos registrado."
-
-# --- PostgreSQL (independente de estar ativo) ---
-log "  Verificando PostgreSQL..."
-for pg_dir in /etc/postgresql/*/main /var/lib/pgsql/*/data /var/lib/pgsql/data; do
-    if [ -d "$pg_dir" ]; then
-        log "    Encontrado: $pg_dir"
-        coletar "postgresql" "$pg_dir/postgresql.conf" "$pg_dir/pg_hba.conf" "$pg_dir/pg_ident.conf"
-    fi
-done
-
-# --- HAProxy (independente de estar ativo) ---
-log "  Verificando HAProxy..."
-[ -f /etc/haproxy/haproxy.cfg ] && coletar "haproxy" /etc/haproxy/haproxy.cfg
-[ -d /etc/haproxy/conf.d ] && coletar "haproxy/conf.d" /etc/haproxy/conf.d/*
-
+    echo ""
+    echo "--- Pacotes Zabbix instalados ---"
+    rpm -qa 2>/dev/null | grep -i zabbix | sort || \
+    dpkg -l 2>/dev/null | grep -i zabbix || echo "nao foi possivel listar"
+} > "${DEST}/00-inventario/inventario.txt"
+log "  [OK] 00-inventario/inventario.txt"
 
 # ===========================================================================
-# 3. EXPORTACAO VIA API (Somente no Host do Server ou Front-End)
+# 3. EXPORTACAO VIA API ZABBIX
+#    Somente no host onde zabbix-server esta instalado (conf existe)
 # ===========================================================================
-# Evita que todo agent faça a mesma requisicao na API exportando os templates
-if systemctl is-active --quiet zabbix-server || [[ "$HOSTNAME_ID" == *"web"* ]] || [[ "$HOSTNAME_ID" == *"zabbix001"* ]]; then
-    log ">>> Coletando dados via API Zabbix..."
-    API_DIR="${DEST}/zabbix-api-export"
+if [ -f /etc/zabbix/zabbix_server.conf ]; then
+    log ">>> Exportando dados via API Zabbix..."
+    API_DIR="${DEST}/zabbix-api"
     mkdir -p "$API_DIR"
 
-    if command -v curl &>/dev/null; then
-        # Usa -k (insecure) caso a API nao possua certificado confiavel globalmente 
-        API_TOKEN=$(curl -k -s -X POST "${ZABBIX_API_URL}" \
+    # Login
+    API_TOKEN=$(curl -k -s -X POST "${ZABBIX_API_URL}" \
+        -H "Content-Type: application/json" \
+        -d "{\"jsonrpc\":\"2.0\",\"method\":\"user.login\",\"params\":{\"username\":\"${ZABBIX_API_USER}\",\"password\":\"${ZABBIX_API_PASS}\"},\"id\":1}" \
+        | grep -oP '"result":"\K[^"]+' 2>/dev/null)
+
+    if [ -n "$API_TOKEN" ]; then
+        log "  [OK] Login na API realizado."
+
+        # --- Templates (inclui Itens, Triggers, LLD e Macros de template) ---
+        log "  [+] Exportando Templates..."
+        TIDS=$(curl -k -s -X POST "${ZABBIX_API_URL}" \
             -H "Content-Type: application/json" \
-            -d '{
-                "jsonrpc": "2.0",
-                "method":  "user.login",
-                "params":  {"username": "'"${ZABBIX_API_USER}"'", "password": "'"${ZABBIX_API_PASS}"'"},
-                "id":      1
-            }' | grep -oP '"result":"\K[^"]+')
+            -d "{\"jsonrpc\":\"2.0\",\"method\":\"template.get\",\"params\":{\"output\":[\"templateid\"]},\"auth\":\"${API_TOKEN}\",\"id\":2}" \
+            | python3 -c "import sys,json; print(','.join(t['templateid'] for t in json.load(sys.stdin).get('result',[])))" 2>/dev/null)
 
-        if [ -n "$API_TOKEN" ]; then
-            log "  [OK] Login na API realizado."
-            
-            # Buscar IDs dos templates
-            TEMPLATE_IDS=$(curl -k -s -X POST "${ZABBIX_API_URL}" \
-                -H "Content-Type: application/json" \
-                -d '{"jsonrpc":"2.0","method":"template.get","params":{"output":["templateid"]},"auth":"'"${API_TOKEN}"'","id":2}' | \
-                python3 -c "import sys, json; data=json.load(sys.stdin); print(','.join([t['templateid'] for t in data.get('result',[])]))" 2>/dev/null)
-
-            if [ -n "$TEMPLATE_IDS" ]; then
-                log "  [+] Exportando Templates (inclui LLD, Triggers e Itens)..."
-                curl -k -s -X POST "${ZABBIX_API_URL}" \
-                    -H "Content-Type: application/json" \
-                    -d '{"jsonrpc":"2.0","method":"configuration.export","params":{"options":{"templates":['"$(echo "$TEMPLATE_IDS" | sed 's/,/","/g' | sed 's/^/"/' | sed 's/$/"/')"']}, "format":"xml"}, "auth":"'"${API_TOKEN}"'", "id":3}' | \
-                    python3 -c "import sys, json; data=json.load(sys.stdin); print(data.get('result', ''))" 2>/dev/null > "${API_DIR}/templates_completos.xml"
-            fi
-
-            log "  [+] Exportando Value Mappings..."
+        if [ -n "$TIDS" ]; then
+            TIDS_JSON=$(python3 -c "ids='${TIDS}'.split(','); print('['+','.join('\"'+i+'\"' for i in ids)+']')" 2>/dev/null)
             curl -k -s -X POST "${ZABBIX_API_URL}" \
                 -H "Content-Type: application/json" \
-                -d '{"jsonrpc": "2.0","method": "valuemap.get","params": {"output": "extend", "selectMappings": "extend"},"auth": "'"${API_TOKEN}"'","id": 4}' | \
-                python3 -c "import sys, json; json.dump(json.load(sys.stdin).get('result', []), sys.stdout, indent=2)" 2>/dev/null > "${API_DIR}/value_mappings.json"
-
-            log "  [+] Exportando Macros Globais..."
-            curl -k -s -X POST "${ZABBIX_API_URL}" \
-                -H "Content-Type: application/json" \
-                -d '{"jsonrpc": "2.0","method": "usermacro.get","params": {"output": "extend", "globalmacro": true},"auth": "'"${API_TOKEN}"'","id": 5}' | \
-                python3 -c "import sys, json; json.dump(json.load(sys.stdin).get('result', []), sys.stdout, indent=2)" 2>/dev/null > "${API_DIR}/macros_globais.json"
-
-            # Fazer logout seguro da API
-            curl -k -s -X POST "${ZABBIX_API_URL}" -H "Content-Type: application/json" -d '{"jsonrpc": "2.0","method": "user.logout","params": [],"auth": "'"${API_TOKEN}"'","id": 6}' >/dev/null
-        else
-            log "  [ERRO] Nao foi possivel autenticar na API. (Verifique o usuario e a senha ou conectividade HTTPS)."
+                -d "{\"jsonrpc\":\"2.0\",\"method\":\"configuration.export\",\"params\":{\"options\":{\"templates\":${TIDS_JSON}},\"format\":\"xml\"},\"auth\":\"${API_TOKEN}\",\"id\":3}" \
+                | python3 -c "import sys,json; print(json.load(sys.stdin).get('result',''))" 2>/dev/null \
+                > "${API_DIR}/templates_completos.xml"
+            [ -s "${API_DIR}/templates_completos.xml" ] && \
+                log "  [OK] zabbix-api/templates_completos.xml" || \
+                log "  [ERRO] templates_completos.xml vazio"
         fi
+
+        # --- Value Mappings ---
+        log "  [+] Exportando Value Mappings..."
+        curl -k -s -X POST "${ZABBIX_API_URL}" \
+            -H "Content-Type: application/json" \
+            -d "{\"jsonrpc\":\"2.0\",\"method\":\"valuemap.get\",\"params\":{\"output\":\"extend\",\"selectMappings\":\"extend\"},\"auth\":\"${API_TOKEN}\",\"id\":4}" \
+            | python3 -c "import sys,json; json.dump(json.load(sys.stdin).get('result',[]),sys.stdout,indent=2)" 2>/dev/null \
+            > "${API_DIR}/value_mappings.json"
+        [ -s "${API_DIR}/value_mappings.json" ] && \
+            log "  [OK] zabbix-api/value_mappings.json" || \
+            log "  [ERRO] value_mappings.json vazio"
+
+        # --- Macros Globais ---
+        log "  [+] Exportando Macros Globais..."
+        curl -k -s -X POST "${ZABBIX_API_URL}" \
+            -H "Content-Type: application/json" \
+            -d "{\"jsonrpc\":\"2.0\",\"method\":\"usermacro.get\",\"params\":{\"output\":\"extend\",\"globalmacro\":true},\"auth\":\"${API_TOKEN}\",\"id\":5}" \
+            | python3 -c "import sys,json; json.dump(json.load(sys.stdin).get('result',[]),sys.stdout,indent=2)" 2>/dev/null \
+            > "${API_DIR}/macros_globais.json"
+        [ -s "${API_DIR}/macros_globais.json" ] && \
+            log "  [OK] zabbix-api/macros_globais.json" || \
+            log "  [ERRO] macros_globais.json vazio"
+
+        # Logout
+        curl -k -s -X POST "${ZABBIX_API_URL}" \
+            -H "Content-Type: application/json" \
+            -d "{\"jsonrpc\":\"2.0\",\"method\":\"user.logout\",\"params\":[],\"auth\":\"${API_TOKEN}\",\"id\":6}" >/dev/null
     else
-        log "  [ERRO] curl nao instalado. Impossivel realizar o dump."
+        log "  [ERRO] Falha no login na API Zabbix."
     fi
 fi
 
 # ===========================================================================
-# 4. GERAR README.md NA RAIZ DO REPOSITORIO
+# 4. GERAR README.md
 # ===========================================================================
-log ">>> Atualizando README.md do repositorio..."
-
-README_FILE="${GIT_REPO_LOCAL}/README.md"
-
+log ">>> Atualizando README.md..."
 {
     echo "# Backup de Configurações Zabbix - Crefisa"
     echo ""
-    echo "> Repositório gerado automaticamente por script de backup."
-    echo "> Última atualização por **${HOSTNAME_ID}** em \`$(date '+%Y-%m-%d %H:%M:%S')\`"
+    echo "> Atualizado automaticamente. Última execução: **${HOSTNAME_ID}** em \`$(date '+%Y-%m-%d %H:%M:%S')\`"
     echo ""
-    echo "---"
-    echo ""
-    echo "## Estrutura do Repositório"
-    echo ""
-    echo "Cada servidor possui sua própria pasta nomeada com o **hostname** da máquina."
-    echo "Dentro de cada pasta, os arquivos são organizados por tipo de serviço:"
+    echo "## Estrutura"
     echo ""
     echo "| Subpasta | Conteúdo |"
     echo "|---|---|"
-    echo "| \`zabbix-server/\` | \`zabbix_server.conf\`, alertscripts, externalscripts |"
+    echo "| \`00-inventario/\` | OS, kernel, pacotes e estado dos serviços |"
+    echo "| \`zabbix-server/\` | \`zabbix_server.conf\` |"
     echo "| \`zabbix-proxy/\` | \`zabbix_proxy.conf\` |"
-    echo "| \`zabbix-agent/\` | \`zabbix_agentd.conf\` e includes (.d/) |"
-    echo "| \`zabbix-agent2/\` | \`zabbix_agent2.conf\` e includes (.d/) |"
-    echo "| \`zabbix-lib/\` | Arquivos de \`/var/lib/zabbix/\` (scripts, certs, MIBs) |"
-    echo "| \`zabbix-api-export/\` | Templates XML, Value Mappings JSON, Macros Globais JSON |"
-    echo "| \`postgresql/\` | \`postgresql.conf\`, \`pg_hba.conf\`, \`pg_ident.conf\` |"
-    echo "| \`haproxy/\` | \`haproxy.cfg\` e arquivos de \`conf.d/\` |"
+    echo "| \`zabbix-agent/\` | \`zabbix_agentd.conf\` + includes de \`.d/\` |"
+    echo "| \`zabbix-agent2/\` | \`zabbix_agent2.conf\` + includes de \`.d/\` |"
+    echo "| \`zabbix-api/\` | \`templates_completos.xml\`, \`value_mappings.json\`, \`macros_globais.json\` |"
+    echo "| \`postgresql/\` | \`postgresql.conf\`, \`pg_hba.conf\` |"
+    echo "| \`haproxy/\` | \`haproxy.cfg\` |"
     echo ""
-    echo "---"
+    echo "## Servidores"
     echo ""
-    echo "## Servidores com Backup Ativo"
-    echo ""
-
-    # Lista dinamicamente todas as pastas de servidor que existem no repo
-    SERVERS_ENCONTRADOS=0
-    for servidor_dir in "${GIT_REPO_LOCAL}"/*/; do
-        servidor=$(basename "$servidor_dir")
-        # Ignora arquivos/pastas de controle do git
-        [ "$servidor" = ".git" ] && continue
-        [ ! -d "$servidor_dir" ] && continue
-
-        SERVERS_ENCONTRADOS=$((SERVERS_ENCONTRADOS + 1))
-        echo "### 📦 \`${servidor}\`"
-        echo ""
-
-        # Lista subpastas existentes
-        for subdir in "$servidor_dir"*/; do
-            [ ! -d "$subdir" ] && continue
-            subpasta=$(basename "$subdir")
-            # Conta arquivos dentro da subpasta
-            num_arquivos=$(find "$subdir" -maxdepth 1 -type f 2>/dev/null | wc -l)
-            echo "- \`${subpasta}/\` — ${num_arquivos} arquivo(s)"
-            # Lista os arquivos
-            while IFS= read -r arq; do
-                echo "  - \`$(basename "$arq")\`"
-            done < <(find "$subdir" -maxdepth 1 -type f 2>/dev/null | sort)
+    for srv in "${GIT_REPO_LOCAL}"/*/; do
+        nome=$(basename "$srv")
+        [[ "$nome" == .git ]] && continue
+        [ ! -d "$srv" ] && continue
+        echo "### \`${nome}\`"
+        for sub in "$srv"*/; do
+            [ -d "$sub" ] || continue
+            count=$(find "$sub" -maxdepth 1 -type f 2>/dev/null | wc -l)
+            echo "- \`$(basename "$sub")/\` — ${count} arquivo(s)"
         done
         echo ""
     done
-
-    if [ "$SERVERS_ENCONTRADOS" -eq 0 ]; then
-        echo "_Nenhum servidor com backup registrado ainda._"
-        echo ""
-    fi
-
-    echo "---"
-    echo ""
-    echo "## Fluxo de Backup"
-    echo ""
-    echo "\`\`\`"
-    echo "Cron (diário às 03:00)  →  Script coleta arquivos  →  Push para branch 'backups'"
-    echo "                                                               ↓"
-    echo "                                             Revisar e fazer Merge Request → master"
-    echo "\`\`\`"
-    echo ""
     echo "## Restauração (DR)"
     echo ""
-    echo "Para restaurar as configurações em caso de desastre:"
+    echo "1. Copie os arquivos \`.conf\` da pasta do servidor para seus locais originais em \`/etc/zabbix/\`"
+    echo "2. Importe \`templates_completos.xml\` via **Configuração → Templates → Importar** no Zabbix"
+    echo "3. Importe os Value Mappings via API ou interface"
     echo ""
-    echo "1. Clone este repositório na máquina de destino"
-    echo "2. Copie os arquivos da pasta do servidor desejado para seus locais originais"
-    echo "3. Para reimportar templates no Zabbix, use: **Configuração → Templates → Importar** e selecione o arquivo \`templates_completos.xml\`"
-    echo "4. Para reimportar Value Mappings, use a API ou interface web do Zabbix"
-    echo ""
-    echo "> **Atenção:** Os arquivos \`.conf\` podem conter credenciais. Mantenha este repositório com acesso restrito."
-
-} > "$README_FILE"
-
+    echo "> ⚠️ Este repositório contém credenciais. Mantenha acesso restrito."
+} > "${GIT_REPO_LOCAL}/README.md"
 log "  [OK] README.md atualizado."
 
 # ===========================================================================
 # 5. COMMIT & PUSH
 # ===========================================================================
-log ">>> Enviando ao repositório GitLab..."
+log ">>> Enviando ao GitLab..."
 cd "$GIT_REPO_LOCAL"
 
-# Adiciona os arquivos do servidor E o README atualizado
 git add -A "${HOSTNAME_ID}/" README.md 2>>"$LOG_FILE"
 
 if git diff --cached --quiet 2>/dev/null; then
-    log "  Nenhuma alteracao de configuracao nesta execucao."
+    log "  Nenhuma alteracao nesta execucao."
 else
     git commit -m "backup(${HOSTNAME_ID}): $(date '+%Y-%m-%d %H:%M')" 2>>"$LOG_FILE"
 fi
 
-
-# Sempre tenta push (tambem envia commits presos de execucoes anteriores)
 PUSH_OK=0
-for tentar in 1 2 3; do
+for tentativa in 1 2 3; do
     if git push origin "$GIT_BRANCH" 2>>"$LOG_FILE"; then
         PUSH_OK=1
-        log "  [OK] Alteracoes enviadas com sucesso!"
+        log "  [OK] Enviado com sucesso!"
         break
     else
-        log "  [RETRY] Houve atualizacoes distantes, tentando rebase... (Tentativa $tentar/3)"
+        log "  [RETRY] Tentativa ${tentativa}/3 - aguardando e tentando rebase..."
         git pull --rebase origin "$GIT_BRANCH" 2>>"$LOG_FILE" || true
         sleep $((RANDOM % 10 + 5))
     fi
 done
-if [ "$PUSH_OK" -eq 0 ]; then
-    log "  [ERRO] Falha ao enviar para o GitLab apos as tentativas."
-fi
+
+[ "$PUSH_OK" -eq 0 ] && log "  [ERRO] Falha ao enviar apos 3 tentativas."
+
+# ===========================================================================
+# 6. LIMPEZA - remove o clone temporario do /tmp
+# ===========================================================================
+log ">>> Removendo area temporaria: ${GIT_REPO_LOCAL}"
+rm -rf "$GIT_REPO_LOCAL"
+log "  [OK] Limpeza concluida."
 
 log "============================================================"
 log "FIM DO BACKUP - ${HOSTNAME_ID}"

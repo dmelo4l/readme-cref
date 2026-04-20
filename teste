@@ -16,7 +16,7 @@ GIT_USER="usr_zabbix"
 GIT_TOKEN="xzeeQpPycx7tT6HBh1Ks"
 GIT_HOST="gitlab.local"
 GIT_PROJECT="zbx/Zabbix"
-GIT_BRANCH="backups"          # Branch dedicada aos backups automaticos (nao protegida)
+GIT_BRANCH="backups"          # Branch dedicada aos backups automaticos
 
 # A URL final de conexao ao GitLab via HTTPS usando Token
 GIT_REPO_URL="https://${GIT_USER}:${GIT_TOKEN}@${GIT_HOST}/${GIT_PROJECT}.git"

@@ -108,53 +108,114 @@ rm -rf "$DEST"
 mkdir -p "$DEST"
 
 # ===========================================================================
-# 2. VERIFICACAO DOS SERVICOS E COLETA ARQUIVOS
+# 2. COLETA DE ARQUIVOS ZABBIX
 # ===========================================================================
-log ">>> Verificando servicos ativos e coletando arquivos..."
+log ">>> Coletando arquivos de configuracao Zabbix..."
 
-# Zabbix Server
-if systemctl is-active --quiet zabbix-server || pgrep -x zabbix_server >/dev/null; then
-    log "  Servico zabbix-server ativo! Coletando..."
-    coletar "zabbix-server" /etc/zabbix/zabbix_server.conf
-    coletar "zabbix-server" /usr/lib/zabbix/alertscripts
-    coletar "zabbix-server" /usr/lib/zabbix/externalscripts
+# --- Funcao auxiliar: busca arquivo por nome em locais comuns e copia ---
+buscar_e_coletar() {
+    local subpasta="$1"
+    local nome_arquivo="$2"
+    local encontrado=0
+
+    while IFS= read -r caminho; do
+        [ -f "$caminho" ] || continue
+        coletar "$subpasta" "$caminho"
+        encontrado=1
+    done < <(find /etc /usr/lib /var/lib /opt /usr/local/etc \
+                  -name "$nome_arquivo" -type f 2>/dev/null)
+
+    [ "$encontrado" -eq 0 ] && log "  [INFO] Arquivo nao encontrado no sistema: ${nome_arquivo}"
+}
+
+# --- Zabbix Server ---
+log "  Verificando Zabbix Server..."
+buscar_e_coletar "zabbix-server" "zabbix_server.conf"
+# Alertscripts e externalscripts (qualquer local)
+for dir in /usr/lib/zabbix/alertscripts /usr/local/lib/zabbix/alertscripts \
+           /usr/lib/zabbix/externalscripts /usr/local/lib/zabbix/externalscripts; do
+    [ -d "$dir" ] && coletar "zabbix-server/$(basename "$dir")" "$dir"/*
+done
+
+# --- Zabbix Proxy ---
+log "  Verificando Zabbix Proxy..."
+buscar_e_coletar "zabbix-proxy" "zabbix_proxy.conf"
+
+# --- Zabbix Agent (versao C / daemon) ---
+log "  Verificando Zabbix Agent..."
+buscar_e_coletar "zabbix-agent" "zabbix_agentd.conf"
+# Includes do agent (.d/)
+for inc_dir in /etc/zabbix/zabbix_agentd.d /usr/local/etc/zabbix/zabbix_agentd.d; do
+    if [ -d "$inc_dir" ]; then
+        log "    Coletando includes de: $inc_dir"
+        coletar "zabbix-agent/agentd.d" "$inc_dir"/*
+    fi
+done
+
+# --- Zabbix Agent 2 (versao Go) ---
+log "  Verificando Zabbix Agent2..."
+buscar_e_coletar "zabbix-agent2" "zabbix_agent2.conf"
+# Includes do agent2 (.d/)
+for inc_dir in /etc/zabbix/zabbix_agent2.d /usr/local/etc/zabbix/zabbix_agent2.d; do
+    if [ -d "$inc_dir" ]; then
+        log "    Coletando includes de: $inc_dir"
+        coletar "zabbix-agent2/agent2.d" "$inc_dir"/*
+    fi
+done
+
+# --- Varredura geral: qualquer .conf relacionado a zabbix em /etc ---
+log "  Varredura geral em /etc por arquivos zabbix..."
+while IFS= read -r arq; do
+    # Evita duplicar arquivos ja coletados acima
+    nome=$(basename "$arq")
+    case "$nome" in
+        zabbix_server.conf|zabbix_proxy.conf|zabbix_agentd.conf|zabbix_agent2.conf)
+            continue ;;  # ja coletado acima
+    esac
+    coletar "zabbix-outros" "$arq"
+done < <(find /etc -iname "*zabbix*" -type f 2>/dev/null | sort)
+
+# --- /var/lib/zabbix (scripts customizados, certs, MIBs) ---
+log "  Coletando /var/lib/zabbix/..."
+if [ -d /var/lib/zabbix ]; then
+    # Percorre recursivamente mas copia arquivo a arquivo mantendo estrutura
+    while IFS= read -r arq; do
+        # Calcula subpasta relativa ex: /var/lib/zabbix/scripts/x.sh -> zabbix-lib/scripts
+        subrel=$(dirname "$arq" | sed 's|/var/lib/zabbix||' | sed 's|^/||')
+        subpasta="zabbix-lib"
+        [ -n "$subrel" ] && subpasta="zabbix-lib/${subrel}"
+        coletar "$subpasta" "$arq"
+    done < <(find /var/lib/zabbix -type f 2>/dev/null | sort)
 fi
 
-# Zabbix Proxy
-if systemctl is-active --quiet zabbix-proxy || pgrep -x zabbix_proxy >/dev/null; then
-    log "  Servico zabbix-proxy ativo! Coletando..."
-    coletar "zabbix-proxy" /etc/zabbix/zabbix_proxy.conf
-fi
-
-# Zabbix Agent (C e Go)
-if systemctl is-active --quiet zabbix-agent || pgrep -x zabbix_agentd >/dev/null; then
-    log "  Servico zabbix-agent ativo! Coletando..."
-    coletar "zabbix-agent" /etc/zabbix/zabbix_agentd.conf /etc/zabbix/zabbix_agentd.d/*
-fi
-
-if systemctl is-active --quiet zabbix-agent2 || pgrep -x zabbix_agent2 >/dev/null; then
-    log "  Servico zabbix-agent2 ativo! Coletando..."
-    coletar "zabbix-agent2" /etc/zabbix/zabbix_agent2.conf /etc/zabbix/zabbix_agent2.d/*
-fi
-
-# Diretorio Lib Geral
-coletar "zabbix-lib" /var/lib/zabbix/*
-
-# Banco PostgreSQL
-if systemctl is-active --quiet postgresql* 2>/dev/null || pgrep -x postgres >/dev/null; then
-    log "  Servico PostgreSQL ativo! Coletando..."
-    for pg_dir in /etc/postgresql/*/main /var/lib/pgsql/*/data /var/lib/pgsql/data; do
-        if [ -d "$pg_dir" ]; then
-            coletar "postgresql" "$pg_dir/postgresql.conf" "$pg_dir/pg_hba.conf" "$pg_dir/pg_ident.conf"
-        fi
+# --- Informacao sobre servicos (mesmo se parado, mostra o estado) ---
+log "  Registrando estado dos servicos Zabbix..."
+SVCDIR="${DEST}/00-inventario"
+mkdir -p "$SVCDIR"
+{
+    echo "=== Estado dos servicos Zabbix em $(hostname) - $(date) ==="
+    for svc in zabbix-server zabbix-proxy zabbix-agent zabbix-agent2; do
+        status=$(systemctl is-active "$svc" 2>/dev/null || echo "nao-instalado")
+        enabled=$(systemctl is-enabled "$svc" 2>/dev/null || echo "nao-instalado")
+        echo "  $svc: status=$status | enabled=$enabled"
     done
-fi
+} > "${SVCDIR}/zabbix_servicos.txt"
+log "  [OK] Estado dos servicos registrado."
 
-# HAProxy
-if systemctl is-active --quiet haproxy || pgrep -x haproxy >/dev/null; then
-    log "  Servico HAProxy ativo! Coletando..."
-    coletar "haproxy" /etc/haproxy/haproxy.cfg /etc/haproxy/conf.d/*
-fi
+# --- PostgreSQL (independente de estar ativo) ---
+log "  Verificando PostgreSQL..."
+for pg_dir in /etc/postgresql/*/main /var/lib/pgsql/*/data /var/lib/pgsql/data; do
+    if [ -d "$pg_dir" ]; then
+        log "    Encontrado: $pg_dir"
+        coletar "postgresql" "$pg_dir/postgresql.conf" "$pg_dir/pg_hba.conf" "$pg_dir/pg_ident.conf"
+    fi
+done
+
+# --- HAProxy (independente de estar ativo) ---
+log "  Verificando HAProxy..."
+[ -f /etc/haproxy/haproxy.cfg ] && coletar "haproxy" /etc/haproxy/haproxy.cfg
+[ -d /etc/haproxy/conf.d ] && coletar "haproxy/conf.d" /etc/haproxy/conf.d/*
+
 
 # ===========================================================================
 # 3. EXPORTACAO VIA API (Somente no Host do Server ou Front-End)

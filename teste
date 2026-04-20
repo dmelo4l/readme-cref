@@ -13,14 +13,13 @@ set -uo pipefail
 # CREDENCIAIS E CONFIGURACOES
 # ===========================================================================
 GIT_USER="usr_zabbix"
-# O '@' na senha quebra a URL do git, entao precisa ser o codigo dele (%40)
-GIT_PASS="bolodoido%40123"
+GIT_TOKEN="xzeeQpPycx7tT6HBh1Ks"
 GIT_HOST="gitlab.local"
 GIT_PROJECT="zbx/Zabbix"
 GIT_BRANCH="main"
 
-# A URL final de conexao ao GitLab via HTTPS
-GIT_REPO_URL="https://${GIT_USER}:${GIT_PASS}@${GIT_HOST}/${GIT_PROJECT}.git"
+# A URL final de conexao ao GitLab via HTTPS usando Token
+GIT_REPO_URL="https://${GIT_USER}:${GIT_TOKEN}@${GIT_HOST}/${GIT_PROJECT}.git"
 
 # Onde o repositorio ficara na maquina alvo
 GIT_REPO_LOCAL="/var/backups/backup-zabbix-repo"

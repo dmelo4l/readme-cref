@@ -8,9 +8,9 @@
 # CONFIGURACOES
 # ===========================================================================
 GITLAB_HOST="gitlab.local"
-GITLAB_PROJECT_PATH="zbx/Zabbix"          # namespace/projeto no GitLab
+GITLAB_PROJECT_PATH="zbx/Zabbix"          
 GITLAB_BRANCH="main"
-GITLAB_TOKEN=""                            # DEIXE VAZIO - usaremos usuario/senha abaixo
+GITLAB_TOKEN=""                            
 GITLAB_USER="usr_zabbix"
 GITLAB_PASS="bolodoido@123"
 

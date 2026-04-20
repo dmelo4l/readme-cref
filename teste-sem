@@ -1,0 +1,305 @@
+#!/bin/bash
+###############################################################################
+# backup_sem_git.sh
+#
+# Faz backup dos arquivos via API REST do GitLab.
+# NAO requer o pacote 'git' instalado no servidor.
+# Requer apenas: curl, bash, python3 (ou python)
+###############################################################################
+
+# ===========================================================================
+# CONFIGURACOES
+# ===========================================================================
+GITLAB_HOST="gitlab.local"
+GITLAB_PROJECT_PATH="zbx/Zabbix"          # namespace/projeto no GitLab
+GITLAB_BRANCH="main"
+GITLAB_TOKEN=""                            # DEIXE VAZIO - usaremos usuario/senha abaixo
+GITLAB_USER="usr_zabbix"
+GITLAB_PASS="bolodoido@123"
+
+ZABBIX_API_URL="https://zbx-web.crefisa.com.br/zabbix/api_jsonrpc.php"
+ZABBIX_API_USER="usr_zabbix_prd"
+ZABBIX_API_PASS='P#UD7!5ohr'
+
+HOSTNAME_ID=$(hostname -s | tr '[:upper:]' '[:lower:]')
+LOG_FILE="/var/log/backup_sem_git.log"
+TMPDIR_BACKUP=$(mktemp -d /tmp/backup_zbx_XXXX)
+
+# ===========================================================================
+# FUNCOES
+# ===========================================================================
+log() {
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
+}
+
+# Obter o ID numerico do projeto no GitLab
+obter_project_id() {
+    local encoded_path
+    encoded_path=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${GITLAB_PROJECT_PATH}', safe=''))" 2>/dev/null || \
+                  python3 -c "import urllib; print(urllib.quote('${GITLAB_PROJECT_PATH}', safe=''))" 2>/dev/null || \
+                  echo "${GITLAB_PROJECT_PATH}" | sed 's|/|%2F|g')
+
+    local result
+    result=$(curl -k -s \
+        -u "${GITLAB_USER}:${GITLAB_PASS}" \
+        "https://${GITLAB_HOST}/api/v4/projects/${encoded_path}")
+
+    echo "$result" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null
+}
+
+# Envia um arquivo para o GitLab via API REST
+# Uso: enviar_arquivo "/caminho/local/arquivo" "pasta/destino/no/repo"
+enviar_arquivo() {
+    local arquivo_local="$1"
+    local subpasta_repo="$2"
+
+    [ ! -f "$arquivo_local" ] && return
+
+    local nome_arquivo
+    nome_arquivo=$(basename "$arquivo_local")
+
+    # Caminho dentro do repositorio: hostname/subpasta/arquivo
+    local repo_path="${HOSTNAME_ID}/${subpasta_repo}/${nome_arquivo}"
+
+    # Codificar o path para uso na URL
+    local encoded_path
+    encoded_path=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${repo_path}', safe=''))" 2>/dev/null || \
+                  echo "$repo_path" | sed 's|/|%2F|g; s| |%20|g')
+
+    # Ler conteudo do arquivo em base64
+    local content_b64
+    content_b64=$(base64 -w 0 "$arquivo_local" 2>/dev/null || base64 "$arquivo_local" 2>/dev/null)
+    [ -z "$content_b64" ] && { log "  [ERRO] Nao conseguiu ler: $arquivo_local"; return; }
+
+    local commit_msg="backup(${HOSTNAME_ID}): ${nome_arquivo} - $(date '+%Y-%m-%d %H:%M')"
+
+    # Tentar atualizar (PUT) - se nao existir ainda, criar (POST)
+    local http_code
+    http_code=$(curl -k -s -o /dev/null -w "%{http_code}" -X PUT \
+        -u "${GITLAB_USER}:${GITLAB_PASS}" \
+        "https://${GITLAB_HOST}/api/v4/projects/${PROJECT_ID}/repository/files/${encoded_path}" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"branch\": \"${GITLAB_BRANCH}\",
+            \"content\": \"${content_b64}\",
+            \"encoding\": \"base64\",
+            \"commit_message\": \"${commit_msg}\"
+        }" 2>/dev/null)
+
+    if [ "$http_code" = "200" ] || [ "$http_code" = "201" ]; then
+        log "  [OK] ${repo_path}"
+        return
+    fi
+
+    # Se PUT falhou (arquivo nao existe ainda), tentar POST
+    http_code=$(curl -k -s -o /dev/null -w "%{http_code}" -X POST \
+        -u "${GITLAB_USER}:${GITLAB_PASS}" \
+        "https://${GITLAB_HOST}/api/v4/projects/${PROJECT_ID}/repository/files/${encoded_path}" \
+        -H "Content-Type: application/json" \
+        -d "{
+            \"branch\": \"${GITLAB_BRANCH}\",
+            \"content\": \"${content_b64}\",
+            \"encoding\": \"base64\",
+            \"commit_message\": \"${commit_msg}\"
+        }" 2>/dev/null)
+
+    if [ "$http_code" = "200" ] || [ "$http_code" = "201" ]; then
+        log "  [OK] ${repo_path} (criado)"
+    else
+        log "  [ERRO] HTTP ${http_code} ao enviar: ${repo_path}"
+    fi
+}
+
+# Salva saida de um comando e envia para o GitLab
+enviar_cmd() {
+    local subpasta="$1"
+    local nome_arquivo="$2"
+    local comando="$3"
+
+    local tmp_file="${TMPDIR_BACKUP}/${nome_arquivo}"
+    if eval "$comando" > "$tmp_file" 2>/dev/null && [ -s "$tmp_file" ]; then
+        enviar_arquivo "$tmp_file" "$subpasta"
+    fi
+}
+
+# Copia arquivo local para pasta temporaria e envia
+coletar() {
+    local subpasta="$1"
+    shift
+    for origem in "$@"; do
+        local encontrados
+        encontrados=$(compgen -G "$origem" 2>/dev/null || true)
+        for item in $encontrados; do
+            [ -f "$item" ] && enviar_arquivo "$item" "$subpasta"
+        done
+    done
+}
+
+# ===========================================================================
+# INICIO
+# ===========================================================================
+log "============================================================"
+log "BACKUP SEM GIT - ${HOSTNAME_ID}"
+log "============================================================"
+
+# Checar dependencias
+if ! command -v curl &>/dev/null; then
+    log "[FATAL] curl nao encontrado. Instale: yum install curl"
+    exit 1
+fi
+
+if ! command -v python3 &>/dev/null; then
+    log "[FATAL] python3 nao encontrado. Instale: yum install python3"
+    exit 1
+fi
+
+# Obter ID do projeto no GitLab
+log ">>> Conectando ao GitLab..."
+PROJECT_ID=$(obter_project_id)
+
+if [ -z "$PROJECT_ID" ]; then
+    log "[FATAL] Nao foi possivel obter o ID do projeto no GitLab."
+    log "[FATAL] Verifique: host (${GITLAB_HOST}), projeto (${GITLAB_PROJECT_PATH}), usuario e senha."
+    # Teste rapido para ajudar no diagnostico
+    log "[DIAG] Testando conectividade..."
+    HTTP_CODE=$(curl -k -s -o /dev/null -w "%{http_code}" "https://${GITLAB_HOST}" 2>/dev/null)
+    log "[DIAG] GET https://${GITLAB_HOST} -> HTTP ${HTTP_CODE}"
+    exit 1
+fi
+
+log "  [OK] Projeto encontrado. ID = ${PROJECT_ID}"
+
+# ===========================================================================
+# COLETA DOS ARQUIVOS
+# ===========================================================================
+
+# --- Inventario ---
+log ""
+log ">>> [01] Inventario"
+enviar_cmd "00-inventario" "os_release.txt"   "cat /etc/os-release"
+enviar_cmd "00-inventario" "kernel.txt"       "uname -a"
+enviar_cmd "00-inventario" "hostname.txt"     "hostname; hostname -f; hostname -i"
+enviar_cmd "00-inventario" "disco.txt"        "df -hT"
+enviar_cmd "00-inventario" "portas.txt"       "ss -tlnp"
+enviar_cmd "00-inventario" "servicos.txt"     "systemctl list-units --type=service --state=active --no-pager"
+enviar_cmd "00-inventario" "pkg_zabbix.txt"   "rpm -qa | grep -i zabbix | sort"
+
+# --- Zabbix Server ---
+if systemctl is-active --quiet zabbix-server 2>/dev/null || pgrep -x zabbix_server >/dev/null 2>/dev/null; then
+    log ""
+    log ">>> [02] Zabbix Server (ativo)"
+    coletar "zabbix-server" /etc/zabbix/zabbix_server.conf
+    # AlertScripts (arquivo por arquivo pois coletar nao suporta diretorios recursivos)
+    for f in /usr/lib/zabbix/alertscripts/*; do
+        [ -f "$f" ] && enviar_arquivo "$f" "zabbix-server/alertscripts"
+    done
+    for f in /usr/lib/zabbix/externalscripts/*; do
+        [ -f "$f" ] && enviar_arquivo "$f" "zabbix-server/externalscripts"
+    done
+fi
+
+# --- Zabbix Proxy ---
+if systemctl is-active --quiet zabbix-proxy 2>/dev/null || pgrep -x zabbix_proxy >/dev/null 2>/dev/null; then
+    log ""
+    log ">>> [03] Zabbix Proxy (ativo)"
+    coletar "zabbix-proxy" /etc/zabbix/zabbix_proxy.conf
+fi
+
+# --- Zabbix Agent ---
+if systemctl is-active --quiet zabbix-agent 2>/dev/null || pgrep -x zabbix_agentd >/dev/null 2>/dev/null; then
+    log ""
+    log ">>> [04] Zabbix Agent (ativo)"
+    coletar "zabbix-agent" /etc/zabbix/zabbix_agentd.conf
+    for f in /etc/zabbix/zabbix_agentd.d/*; do
+        [ -f "$f" ] && enviar_arquivo "$f" "zabbix-agent/agentd.d"
+    done
+fi
+
+# --- Zabbix Agent 2 ---
+if systemctl is-active --quiet zabbix-agent2 2>/dev/null || pgrep -x zabbix_agent2 >/dev/null 2>/dev/null; then
+    log ""
+    log ">>> [05] Zabbix Agent2 (ativo)"
+    coletar "zabbix-agent2" /etc/zabbix/zabbix_agent2.conf
+    for f in /etc/zabbix/zabbix_agent2.d/*; do
+        [ -f "$f" ] && enviar_arquivo "$f" "zabbix-agent2/agent2.d"
+    done
+fi
+
+# --- PostgreSQL ---
+if pgrep -x postgres >/dev/null 2>/dev/null || systemctl is-active --quiet postgresql 2>/dev/null; then
+    log ""
+    log ">>> [06] PostgreSQL (ativo)"
+    for pg_dir in /etc/postgresql/*/main /var/lib/pgsql/*/data /var/lib/pgsql/data; do
+        if [ -d "$pg_dir" ]; then
+            coletar "postgresql" "${pg_dir}/postgresql.conf" "${pg_dir}/pg_hba.conf"
+        fi
+    done
+fi
+
+# --- HAProxy ---
+if systemctl is-active --quiet haproxy 2>/dev/null || pgrep -x haproxy >/dev/null 2>/dev/null; then
+    log ""
+    log ">>> [07] HAProxy (ativo)"
+    coletar "haproxy" /etc/haproxy/haproxy.cfg
+fi
+
+# --- Exports via API Zabbix ---
+if systemctl is-active --quiet zabbix-server 2>/dev/null; then
+    log ""
+    log ">>> [08] API Zabbix - Exportando templates..."
+
+    ZBXTOKEN=$(curl -k -s -X POST "${ZABBIX_API_URL}" \
+        -H "Content-Type: application/json" \
+        -d '{"jsonrpc":"2.0","method":"user.login","params":{"username":"'"${ZABBIX_API_USER}"'","password":"'"${ZABBIX_API_PASS}"'"},"id":1}' \
+        | grep -oP '"result":"\K[^"]+')
+
+    if [ -n "$ZBXTOKEN" ]; then
+        # IDs dos templates
+        TIDS=$(curl -k -s -X POST "${ZABBIX_API_URL}" \
+            -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","method":"template.get","params":{"output":["templateid"]},"auth":"'"${ZBXTOKEN}"'","id":2}' | \
+            python3 -c "import sys,json; d=json.load(sys.stdin); print(','.join(t['templateid'] for t in d.get('result',[])))" 2>/dev/null)
+
+        if [ -n "$TIDS" ]; then
+            XML_FILE="${TMPDIR_BACKUP}/templates_completos.xml"
+            curl -k -s -X POST "${ZABBIX_API_URL}" \
+                -H "Content-Type: application/json" \
+                -d '{"jsonrpc":"2.0","method":"configuration.export","params":{"options":{"templates":['"$(echo "$TIDS" | sed 's/,/","/g; s/^/"/; s/$/"/')"']},"format":"xml"},"auth":"'"${ZBXTOKEN}"'","id":3}' | \
+                python3 -c "import sys,json; print(json.load(sys.stdin).get('result',''))" 2>/dev/null > "$XML_FILE"
+            [ -s "$XML_FILE" ] && enviar_arquivo "$XML_FILE" "zabbix-api"
+
+            # Value Mappings
+            VM_FILE="${TMPDIR_BACKUP}/value_mappings.json"
+            curl -k -s -X POST "${ZABBIX_API_URL}" \
+                -H "Content-Type: application/json" \
+                -d '{"jsonrpc":"2.0","method":"valuemap.get","params":{"output":"extend","selectMappings":"extend"},"auth":"'"${ZBXTOKEN}"'","id":4}' | \
+                python3 -c "import sys,json; json.dump(json.load(sys.stdin).get('result',[]),sys.stdout,indent=2)" 2>/dev/null > "$VM_FILE"
+            [ -s "$VM_FILE" ] && enviar_arquivo "$VM_FILE" "zabbix-api"
+
+            # Macros globais
+            MC_FILE="${TMPDIR_BACKUP}/macros_globais.json"
+            curl -k -s -X POST "${ZABBIX_API_URL}" \
+                -H "Content-Type: application/json" \
+                -d '{"jsonrpc":"2.0","method":"usermacro.get","params":{"output":"extend","globalmacro":true},"auth":"'"${ZBXTOKEN}"'","id":5}' | \
+                python3 -c "import sys,json; json.dump(json.load(sys.stdin).get('result',[]),sys.stdout,indent=2)" 2>/dev/null > "$MC_FILE"
+            [ -s "$MC_FILE" ] && enviar_arquivo "$MC_FILE" "zabbix-api"
+        fi
+
+        curl -k -s -X POST "${ZABBIX_API_URL}" -H "Content-Type: application/json" \
+            -d '{"jsonrpc":"2.0","method":"user.logout","params":[],"auth":"'"${ZBXTOKEN}"'","id":6}' >/dev/null
+        log "  [OK] Exportacao via API concluida."
+    else
+        log "  [ERRO] Falha no login na API Zabbix."
+    fi
+fi
+
+# ===========================================================================
+# LIMPEZA
+# ===========================================================================
+rm -rf "$TMPDIR_BACKUP"
+
+log ""
+log "============================================================"
+log "BACKUP FINALIZADO - ${HOSTNAME_ID}"
+log "Arquivos enviados diretamente para: https://${GITLAB_HOST}/${GITLAB_PROJECT_PATH}"
+log "============================================================"

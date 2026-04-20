@@ -24,7 +24,7 @@ crontab -e
 
 ## Rodar todo dia às 03:00 da manhã (recomendado)
 ```bash
-0 3 * * * /usr/local/bin/backup_zabbix.sh >> /var/log/backup_zabbix_basico.log 2>&1
+0 3 * * * /usr/local/bin/backup_zabbix.sh >> /var/log/backup_zabbix.log 2>&1
 ```
 
 ## Ver o cron do root

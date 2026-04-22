@@ -128,10 +128,7 @@ coletar "zabbix-agent2" "/etc/zabbix/zabbix_agent2.conf"
 coletar_dir "zabbix-agent2/agent2.d" "/etc/zabbix/zabbix_agent2.d"
 
 # --- PostgreSQL ---
-for pg_dir in \
-    /etc/postgresql/*/main \
-    /var/lib/pgsql/*/data \
-    /var/lib/pgsql/data; do
+for pg_dir in /etc/postgresql/*/main /var/lib/pgsql/*/data /var/lib/pgsql/data; do
     [ -d "$pg_dir" ] || continue
     coletar "postgresql" "${pg_dir}/postgresql.conf"
     coletar "postgresql" "${pg_dir}/pg_hba.conf"

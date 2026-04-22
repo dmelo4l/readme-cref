@@ -51,9 +51,11 @@ coletar() {
 
     [ ! -e "$origem" ] && return
     mkdir -p "$destino"
-    cp -p "$origem" "$destino/" 2>/dev/null && \
-        log "  [OK] ${subpasta}/$(basename "$origem")" || \
+    if cp -p "$origem" "$destino/" 2>/dev/null; then
+        log "  [OK] ${subpasta}/$(basename "$origem")"
+    else
         log "  [ERRO] Falha ao copiar: ${origem}"
+    fi
 }
 
 # Copia todos os arquivos (nao recursivo) de um diretorio
@@ -64,8 +66,10 @@ coletar_dir() {
     local destino="${DEST}/${subpasta}"
     mkdir -p "$destino"
     for f in "$dir"/*; do
-        [ -f "$f" ] && cp -p "$f" "$destino/" 2>/dev/null && \
+        if [ -f "$f" ]; then
+            cp -p "$f" "$destino/" 2>/dev/null
             log "  [OK] ${subpasta}/$(basename "$f")"
+        fi
     done
 }
 
@@ -157,8 +161,7 @@ mkdir -p "${DEST}/00-inventario"
     done
     echo ""
     echo "--- Pacotes Zabbix instalados ---"
-    rpm -qa 2>/dev/null | grep -i zabbix | sort || \
-    dpkg -l 2>/dev/null | grep -i zabbix || echo "nao foi possivel listar"
+    rpm -qa 2>/dev/null | grep -i zabbix | sort || dpkg -l 2>/dev/null | grep -i zabbix || echo "nao foi possivel listar"
 } > "${DEST}/00-inventario/inventario.txt"
 log "  [OK] 00-inventario/inventario.txt"
 
@@ -172,59 +175,45 @@ if [ -f /etc/zabbix/zabbix_server.conf ]; then
     mkdir -p "$API_DIR"
 
     # Login
-    API_TOKEN=$(curl -k -s -X POST "${ZABBIX_API_URL}" \
-        -H "Content-Type: application/json" \
-        -d "{\"jsonrpc\":\"2.0\",\"method\":\"user.login\",\"params\":{\"username\":\"${ZABBIX_API_USER}\",\"password\":\"${ZABBIX_API_PASS}\"},\"id\":1}" \
-        | grep -oP '"result":"\K[^"]+' 2>/dev/null)
+    API_TOKEN=$(curl -k -s -X POST "${ZABBIX_API_URL}" -H "Content-Type: application/json" -d "{\"jsonrpc\":\"2.0\",\"method\":\"user.login\",\"params\":{\"username\":\"${ZABBIX_API_USER}\",\"password\":\"${ZABBIX_API_PASS}\"},\"id\":1}" | grep -oP '"result":"\K[^"]+' 2>/dev/null)
 
     if [ -n "$API_TOKEN" ]; then
         log "  [OK] Login na API realizado."
 
         # --- Templates (inclui Itens, Triggers, LLD e Macros de template) ---
         log "  [+] Exportando Templates..."
-        TIDS=$(curl -k -s -X POST "${ZABBIX_API_URL}" \
-            -H "Content-Type: application/json" \
-            -d "{\"jsonrpc\":\"2.0\",\"method\":\"template.get\",\"params\":{\"output\":[\"templateid\"]},\"auth\":\"${API_TOKEN}\",\"id\":2}" \
-            | python3 -c "import sys,json; print(','.join(t['templateid'] for t in json.load(sys.stdin).get('result',[])))" 2>/dev/null)
+        TIDS=$(curl -k -s -X POST "${ZABBIX_API_URL}" -H "Content-Type: application/json" -d "{\"jsonrpc\":\"2.0\",\"method\":\"template.get\",\"params\":{\"output\":[\"templateid\"]},\"auth\":\"${API_TOKEN}\",\"id\":2}" | python3 -c "import sys,json; print(','.join(t['templateid'] for t in json.load(sys.stdin).get('result',[])))" 2>/dev/null)
 
         if [ -n "$TIDS" ]; then
             TIDS_JSON=$(python3 -c "ids='${TIDS}'.split(','); print('['+','.join('\"'+i+'\"' for i in ids)+']')" 2>/dev/null)
-            curl -k -s -X POST "${ZABBIX_API_URL}" \
-                -H "Content-Type: application/json" \
-                -d "{\"jsonrpc\":\"2.0\",\"method\":\"configuration.export\",\"params\":{\"options\":{\"templates\":${TIDS_JSON}},\"format\":\"xml\"},\"auth\":\"${API_TOKEN}\",\"id\":3}" \
-                | python3 -c "import sys,json; print(json.load(sys.stdin).get('result',''))" 2>/dev/null \
-                > "${API_DIR}/templates_completos.xml"
-            [ -s "${API_DIR}/templates_completos.xml" ] && \
-                log "  [OK] zabbix-api/templates_completos.xml" || \
+            curl -k -s -X POST "${ZABBIX_API_URL}" -H "Content-Type: application/json" -d "{\"jsonrpc\":\"2.0\",\"method\":\"configuration.export\",\"params\":{\"options\":{\"templates\":${TIDS_JSON}},\"format\":\"xml\"},\"auth\":\"${API_TOKEN}\",\"id\":3}" | python3 -c "import sys,json; print(json.load(sys.stdin).get('result',''))" 2>/dev/null > "${API_DIR}/templates_completos.xml"
+            if [ -s "${API_DIR}/templates_completos.xml" ]; then
+                log "  [OK] zabbix-api/templates_completos.xml"
+            else
                 log "  [ERRO] templates_completos.xml vazio"
+            fi
         fi
 
         # --- Value Mappings ---
         log "  [+] Exportando Value Mappings..."
-        curl -k -s -X POST "${ZABBIX_API_URL}" \
-            -H "Content-Type: application/json" \
-            -d "{\"jsonrpc\":\"2.0\",\"method\":\"valuemap.get\",\"params\":{\"output\":\"extend\",\"selectMappings\":\"extend\"},\"auth\":\"${API_TOKEN}\",\"id\":4}" \
-            | python3 -c "import sys,json; json.dump(json.load(sys.stdin).get('result',[]),sys.stdout,indent=2)" 2>/dev/null \
-            > "${API_DIR}/value_mappings.json"
-        [ -s "${API_DIR}/value_mappings.json" ] && \
-            log "  [OK] zabbix-api/value_mappings.json" || \
+        curl -k -s -X POST "${ZABBIX_API_URL}" -H "Content-Type: application/json" -d "{\"jsonrpc\":\"2.0\",\"method\":\"valuemap.get\",\"params\":{\"output\":\"extend\",\"selectMappings\":\"extend\"},\"auth\":\"${API_TOKEN}\",\"id\":4}" | python3 -c "import sys,json; json.dump(json.load(sys.stdin).get('result',[]),sys.stdout,indent=2)" 2>/dev/null > "${API_DIR}/value_mappings.json"
+        if [ -s "${API_DIR}/value_mappings.json" ]; then
+            log "  [OK] zabbix-api/value_mappings.json"
+        else
             log "  [ERRO] value_mappings.json vazio"
+        fi
 
         # --- Macros Globais ---
         log "  [+] Exportando Macros Globais..."
-        curl -k -s -X POST "${ZABBIX_API_URL}" \
-            -H "Content-Type: application/json" \
-            -d "{\"jsonrpc\":\"2.0\",\"method\":\"usermacro.get\",\"params\":{\"output\":\"extend\",\"globalmacro\":true},\"auth\":\"${API_TOKEN}\",\"id\":5}" \
-            | python3 -c "import sys,json; json.dump(json.load(sys.stdin).get('result',[]),sys.stdout,indent=2)" 2>/dev/null \
-            > "${API_DIR}/macros_globais.json"
-        [ -s "${API_DIR}/macros_globais.json" ] && \
-            log "  [OK] zabbix-api/macros_globais.json" || \
+        curl -k -s -X POST "${ZABBIX_API_URL}" -H "Content-Type: application/json" -d "{\"jsonrpc\":\"2.0\",\"method\":\"usermacro.get\",\"params\":{\"output\":\"extend\",\"globalmacro\":true},\"auth\":\"${API_TOKEN}\",\"id\":5}" | python3 -c "import sys,json; json.dump(json.load(sys.stdin).get('result',[]),sys.stdout,indent=2)" 2>/dev/null > "${API_DIR}/macros_globais.json"
+        if [ -s "${API_DIR}/macros_globais.json" ]; then
+            log "  [OK] zabbix-api/macros_globais.json"
+        else
             log "  [ERRO] macros_globais.json vazio"
+        fi
 
         # Logout
-        curl -k -s -X POST "${ZABBIX_API_URL}" \
-            -H "Content-Type: application/json" \
-            -d "{\"jsonrpc\":\"2.0\",\"method\":\"user.logout\",\"params\":[],\"auth\":\"${API_TOKEN}\",\"id\":6}" >/dev/null
+        curl -k -s -X POST "${ZABBIX_API_URL}" -H "Content-Type: application/json" -d "{\"jsonrpc\":\"2.0\",\"method\":\"user.logout\",\"params\":[],\"auth\":\"${API_TOKEN}\",\"id\":6}" >/dev/null
     else
         log "  [ERRO] Falha no login na API Zabbix."
     fi

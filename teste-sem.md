@@ -16,7 +16,8 @@ rm -rf /var/backups/backup-zabbix-repo
 ## 4. Ajuste permissoes e GO!
 ```bash
 chmod +x /usr/local/bin/backup_zabbix.sh
-
+```
+```bash
 /usr/local/bin/backup_zabbix.sh
 ```
 
